@@ -424,27 +424,11 @@ function createPushButton() {
         return;
       }
       
-      // Get workflow name to find file
-      const n8nUrl = config.n8nUrl.replace(/\/$/, '');
-      const workflowUrl = `${n8nUrl}/api/v1/workflows/${workflowId}`;
-      const workflowResponse = await fetch(workflowUrl, {
-        method: 'GET',
-        headers: {
-          'X-N8N-API-KEY': config.n8nApiKey,
-          'Content-Type': 'application/json'
-        }
-      });
-      
-      if (!workflowResponse.ok) {
-        throw new Error('Failed to fetch workflow from n8n');
-      }
-      
-      const workflowData = await workflowResponse.json();
-      const workflowName = workflowData.name || `workflow-${workflowId}`;
-      const sanitizedName = workflowName.replace(/[^a-zA-Z0-9-_]/g, '-');
+      // Use workflow ID directly in path pattern (don't need to fetch workflow name)
+      // The GitHub file should match the pattern with workflow-id
       const filePath = config.githubPathPattern
-        .replace('{workflow-name}', sanitizedName)
-        .replace('{workflow-id}', workflowId);
+        .replace('{workflow-id}', workflowId)
+        .replace('{workflow-name}', `workflow-${workflowId}`); // Fallback if workflow-name not in pattern
       
       pullBtn.disabled = true;
       pullBtn.innerHTML = 'Pulling...';
@@ -458,11 +442,13 @@ function createPushButton() {
       
       if (pullResponse && pullResponse.success) {
         // Import workflow to n8n
+        // Use the workflow ID from the current page instead of searching by name
         const importResponse = await sendMessageSafe({
           action: 'importWorkflowToN8n',
           instanceUrl: instanceUrl,
           workflowData: pullResponse.content.content,
-          workflowName: pullResponse.content.name
+          workflowName: pullResponse.content.name,
+          workflowId: workflowId // Pass the current workflow ID to update it directly
         });
         
         if (importResponse && importResponse.success) {
@@ -1817,38 +1803,13 @@ async function showInstanceEditView(instanceId) {
       log('Error loading instance:', error);
     }
   } else {
-    // Adding new instance - auto-fill URL from current page
+    // Adding new instance - only auto-fill URL from current page
+    // Don't load existing config - let user enter fresh values
     const currentUrl = getInstanceUrl();
     config.n8nUrl = currentUrl;
-    
-    // Also try to load existing config for this URL (if it exists from legacy storage)
-    try {
-      const response = await sendMessageSafe({ 
-        action: 'getConfig',
-        instanceUrl: currentUrl
-      });
-      if (response && response.success && response.config) {
-        const existingConfig = response.config;
-        // Only use existing config if it has actual values (not just defaults)
-        if (existingConfig.n8nApiKey || existingConfig.githubRepo || existingConfig.githubToken) {
-          config = {
-            ...config,
-            n8nApiKey: existingConfig.n8nApiKey || '',
-    githubRepo: existingConfig.githubRepo || '',
-    githubToken: existingConfig.githubToken || '',
-    githubPathPattern: existingConfig.githubPathPattern || config.githubPathPattern,
-    commitMessage: existingConfig.commitMessage || config.commitMessage,
-    defaultBranch: existingConfig.defaultBranch || 'main'
-          };
-        }
-      }
-    } catch (error) {
-      log('Error loading existing config:', error);
-    }
   }
   
   const isNewInstance = !instanceId;
-  const urlReadonly = isNewInstance ? 'readonly' : '';
   const urlNote = isNewInstance ? ' (auto-detected from current page)' : '';
   
   detailsTitle.textContent = isNewInstance ? 'Add New Instance' : 'Edit Instance';
@@ -1859,7 +1820,7 @@ async function showInstanceEditView(instanceId) {
     </div>
         <div class="n8n-github-settings-field">
       <label for="n8n-url">n8n Instance URL *${urlNote}</label>
-      <input type="text" id="n8n-url" placeholder="https://n8n.example.com or http://localhost:5678" value="${escapeHtml(config.n8nUrl || '')}" autocomplete="off" data-lpignore="true" ${urlReadonly} style="${urlReadonly ? 'background-color: #f3f4f6; cursor: not-allowed;' : ''}" />
+      <input type="text" id="n8n-url" placeholder="https://n8n.example.com or http://localhost:5678" value="${escapeHtml(config.n8nUrl || '')}" autocomplete="off" data-lpignore="true" />
       <small>${isNewInstance ? 'Auto-detected from current page. You can edit this if needed.' : 'Base URL of your n8n instance'}</small>
         </div>
         
@@ -1998,29 +1959,18 @@ async function showInstanceEditView(instanceId) {
     tokenInput.addEventListener('blur', reloadBranches);
   }
   
-  // Ensure all input fields are editable (prevent autofill from blocking)
-  // But keep URL field readonly for new instances
+  // Ensure all input fields are editable
   setTimeout(() => {
-    const inputs = detailsContent.querySelectorAll('input');
-    const urlInput = shadowRoot.getElementById('n8n-url');
+    const inputs = shadowRoot.querySelectorAll('#n8n-details-content input, #n8n-details-content select');
     
     inputs.forEach(input => {
-      // Skip URL field if it's a new instance (keep it readonly)
-      if (input === urlInput && isNewInstance) {
-        // Allow editing URL for new instances if user double-clicks or explicitly wants to change it
-        input.addEventListener('dblclick', function() {
-          this.readOnly = false;
-          this.removeAttribute('readonly');
-          this.style.backgroundColor = '';
-          this.style.cursor = '';
-          this.focus();
-          this.select();
-        });
-        return;
-      }
-      
-      // Remove readonly if it exists (for other fields)
+      // Remove readonly/disabled attributes
       input.removeAttribute('readonly');
+      input.removeAttribute('disabled');
+      // Force editable state
+      input.readOnly = false;
+      input.disabled = false;
+      
       // Ensure autocomplete is set
       if (input.type === 'password') {
         input.setAttribute('autocomplete', 'new-password');
@@ -2028,18 +1978,25 @@ async function showInstanceEditView(instanceId) {
         input.setAttribute('autocomplete', 'off');
       }
       input.setAttribute('data-lpignore', 'true');
-      // Force editable
-      input.readOnly = false;
-      input.disabled = false;
       
       // Add focus handler to ensure field is editable when clicked
       input.addEventListener('focus', function() {
         this.readOnly = false;
         this.removeAttribute('readonly');
+        this.disabled = false;
+        this.removeAttribute('disabled');
         // Select all text to make it easy to replace
-        if (this.value) {
+        if (this.value && this.type !== 'password') {
           setTimeout(() => this.select(), 10);
         }
+      });
+      
+      // Also handle click to ensure it's editable
+      input.addEventListener('click', function() {
+        this.readOnly = false;
+        this.removeAttribute('readonly');
+        this.disabled = false;
+        this.removeAttribute('disabled');
       });
     });
   }, 100);
@@ -2492,11 +2449,21 @@ async function saveInstanceSettings() {
 
 // Toggle settings panel visibility
 function toggleSettingsPanel() {
+  // Ensure panel is injected
+  if (!settingsPanelShadowRoot) {
+    log('Settings panel shadow root not found, injecting...');
+    injectSettingsPanel();
+  }
+  
   const shadowRoot = getSettingsPanelShadowRoot();
   const panel = shadowRoot.getElementById('n8n-github-settings-panel');
   if (!panel) {
     log('Settings panel not found, injecting...');
     injectSettingsPanel();
+    // Try again after injection
+    setTimeout(() => {
+      toggleSettingsPanel();
+    }, 100);
     return;
   }
   

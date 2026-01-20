@@ -637,7 +637,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   
   if (request.action === 'pullWorkflowFromGitHub') {
     pullWorkflowFromGitHub(request.instanceUrl, request.filePath, request.branch)
-      .then(result => sendResponse({ success: true, ...result }))
+      .then(result => {
+        // Update lastUsed timestamp for the instance
+        if (request.instanceUrl) {
+          updateInstanceLastUsedByUrl(request.instanceUrl).catch(() => {});
+        }
+        sendResponse({ success: true, ...result });
+      })
       .catch(error => sendResponse({ success: false, error: sanitizeError(error, DEBUG) }));
     return true;
   }
@@ -1496,7 +1502,7 @@ async function findWorkflowByName(n8nUrl, apiKey, workflowName) {
 }
 
 // Import workflow to n8n (create or update)
-async function importWorkflowToN8n(instanceUrl, workflowData, workflowName) {
+async function importWorkflowToN8n(instanceUrl, workflowData, workflowName, workflowId = null) {
   const config = await getConfig(instanceUrl);
   
   if (!config.n8nUrl || !config.n8nApiKey) {
@@ -1505,14 +1511,39 @@ async function importWorkflowToN8n(instanceUrl, workflowData, workflowName) {
   
   const n8nUrl = config.n8nUrl.replace(/\/$/, '');
   
-  // Try to find existing workflow by name
-  const existingWorkflow = await findWorkflowByName(n8nUrl, config.n8nApiKey, workflowName);
-  
-  // Prepare workflow data (remove id if updating, keep if creating new)
+  // Prepare workflow data
   const workflowPayload = {
     ...workflowData,
     name: workflowName
   };
+  
+  // If workflowId is provided, update the existing workflow directly
+  if (workflowId) {
+    workflowPayload.id = workflowId;
+    const response = await fetch(`${n8nUrl}/api/v1/workflows/${workflowId}`, {
+      method: 'PUT',
+      headers: {
+        'X-N8N-API-KEY': config.n8nApiKey,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(workflowPayload)
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Failed to update workflow: ${response.status} ${errorText}`);
+    }
+    
+    const updated = await response.json();
+    return {
+      action: 'updated',
+      workflowId: updated.id,
+      workflowName: updated.name
+    };
+  }
+  
+  // Try to find existing workflow by name (fallback if no workflowId provided)
+  const existingWorkflow = await findWorkflowByName(n8nUrl, config.n8nApiKey, workflowName);
   
   if (existingWorkflow) {
     // Update existing workflow
