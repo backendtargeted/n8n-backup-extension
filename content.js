@@ -34,6 +34,13 @@ function getWorkflowId() {
   return workflowId;
 }
 
+// Get current n8n instance URL (normalized)
+function getInstanceUrl() {
+  const origin = window.location.origin;
+  log('getInstanceUrl:', origin);
+  return origin;
+}
+
 // Find header element with multiple strategies
 function findHeader() {
   log('Finding header element...');
@@ -170,12 +177,12 @@ function injectPushButton() {
   const container = createPushButton();
   
   // Always use fixed position to ensure visibility
-  // This avoids issues with hidden drawers or complex n8n UI
-  log('Injecting button with fixed position for guaranteed visibility');
-  container.style.cssText = 'position: fixed; top: 10px; right: 10px; z-index: 99999; display: flex; align-items: center; gap: 4px;';
+  // Position at bottom right, above the bottom bar
+  log('Injecting button with fixed position at bottom');
+  container.style.cssText = 'position: fixed; bottom: 60px; right: 10px; z-index: 99999; display: flex; align-items: center; gap: 4px;';
   document.body.appendChild(container);
   buttonInjected = true;
-  log('Push button injected with fixed position');
+  log('Push button injected with fixed position at bottom');
   
   // #region agent log
   setTimeout(() => {
@@ -204,7 +211,7 @@ function createPushButton() {
   const btn = document.createElement('button');
   btn.id = 'n8n-github-sync-btn';
   btn.className = 'n8n-github-sync-btn';
-  btn.innerHTML = '🚀 Push to GitHub';
+  btn.innerHTML = 'Push to GitHub';
   btn.title = 'Push workflow to GitHub (Right-click for settings)';
   
   // Add settings icon button
@@ -232,10 +239,15 @@ function createPushButton() {
     log('Push button clicked');
     
     // Check if settings are configured first
+    const instanceUrl = getInstanceUrl();
+    let config = null;
     try {
-      const configResponse = await chrome.runtime.sendMessage({ action: 'getConfig' });
+      const configResponse = await chrome.runtime.sendMessage({ 
+        action: 'getConfig',
+        instanceUrl: instanceUrl
+      });
       if (configResponse && configResponse.success && configResponse.config) {
-        const config = configResponse.config;
+        config = configResponse.config;
         if (!config.n8nUrl || !config.n8nApiKey || !config.githubRepo || !config.githubToken) {
           log('Settings not configured, opening settings panel');
           showNotification('Please configure settings first', 'error');
@@ -253,14 +265,23 @@ function createPushButton() {
       return;
     }
     
+    // Show commit message prompt
+    const commitMessage = await showCommitMessagePrompt(config);
+    if (commitMessage === null) {
+      // User cancelled
+      return;
+    }
+    
     btn.disabled = true;
-    btn.innerHTML = '⏳ Pushing...';
+    btn.innerHTML = 'Pushing...';
     
     try {
       log('Sending message to background script...');
       const response = await chrome.runtime.sendMessage({
         action: 'pushToGit',
-        workflowId: workflowId
+        workflowId: workflowId,
+        instanceUrl: instanceUrl,
+        commitMessage: commitMessage || undefined
       });
       
       log('Response from background:', JSON.stringify(response, null, 2));
@@ -291,7 +312,7 @@ function createPushButton() {
       showNotification(`Error: ${error.message}`, 'error');
     } finally {
       btn.disabled = false;
-      btn.innerHTML = '🚀 Push to GitHub';
+      btn.innerHTML = 'Push to GitHub';
     }
   });
   
@@ -372,6 +393,8 @@ function createSettingsButton() {
   return btn;
 }
 
+let currentEditingInstanceId = null;
+
 // Inject settings panel
 function injectSettingsPanel() {
   if (document.getElementById('n8n-github-settings-panel')) {
@@ -385,50 +408,20 @@ function injectSettingsPanel() {
   panel.id = 'n8n-github-settings-panel';
   panel.className = 'n8n-github-settings-panel';
   panel.style.display = 'none';
+  // Prevent n8n from detecting this as a workflow import
+  panel.setAttribute('data-n8n-ignore', 'true');
+  panel.setAttribute('data-no-workflow-import', 'true');
   
   panel.innerHTML = `
-    <div class="n8n-github-settings-content">
+    <div class="n8n-github-settings-content" data-n8n-ignore="true" data-no-workflow-import="true">
       <div class="n8n-github-settings-header">
-        <h3>n8n GitHub Backup Settings</h3>
+        <div>
+          <h3>n8n GitHub Backup Settings</h3>
+        </div>
         <button class="n8n-github-settings-close" id="n8n-github-settings-close">×</button>
       </div>
-      <div class="n8n-github-settings-body">
-        <div class="n8n-github-settings-field">
-          <label for="n8n-url">n8n Instance URL *</label>
-          <input type="text" id="n8n-url" placeholder="https://n8n.example.com or http://localhost:5678" />
-          <small>Base URL of your n8n instance</small>
-        </div>
-        
-        <div class="n8n-github-settings-field">
-          <label for="n8n-api-key">n8n API Key *</label>
-          <input type="password" id="n8n-api-key" placeholder="Your n8n API key" />
-          <small>Found in n8n Settings > API</small>
-        </div>
-        
-        <div class="n8n-github-settings-field">
-          <label for="github-repo">GitHub Repository *</label>
-          <input type="text" id="github-repo" placeholder="owner/repo" />
-          <small>Format: owner/repository-name</small>
-        </div>
-        
-        <div class="n8n-github-settings-field">
-          <label for="github-token">GitHub Personal Access Token *</label>
-          <input type="password" id="github-token" placeholder="ghp_xxxxxxxxxxxx" />
-          <small>Token with 'repo' scope. Create at: github.com/settings/tokens</small>
-        </div>
-        
-        <div class="n8n-github-settings-field">
-          <label for="github-path-pattern">GitHub Path Pattern</label>
-          <input type="text" id="github-path-pattern" placeholder="workflows/{workflow-name}.json" />
-          <small>Use {workflow-name} and {workflow-id} as placeholders</small>
-        </div>
-        
-        <div class="n8n-github-settings-actions">
-          <button id="n8n-github-settings-save" class="n8n-github-settings-save">Save</button>
-          <button id="n8n-github-settings-cancel" class="n8n-github-settings-cancel">Cancel</button>
-        </div>
-        
-        <div id="n8n-github-settings-message" class="n8n-github-settings-message"></div>
+      <div class="n8n-github-settings-body" id="n8n-github-settings-body" data-n8n-ignore="true" data-no-workflow-import="true">
+        <!-- Content will be dynamically loaded -->
       </div>
     </div>
   `;
@@ -436,70 +429,352 @@ function injectSettingsPanel() {
   document.body.appendChild(panel);
   log('Settings panel injected');
   
-  // Load existing settings
-  loadSettings();
+  // Prevent n8n from intercepting events in the settings panel
+  // But allow clicks on buttons and inputs within the panel
+  panel.addEventListener('click', (e) => {
+    // Only stop propagation if it's not a button or input
+    if (!e.target.closest('button') && !e.target.closest('input') && !e.target.closest('textarea')) {
+      e.stopPropagation();
+    }
+  }, true);
+  
+  panel.addEventListener('mousedown', (e) => {
+    if (!e.target.closest('button') && !e.target.closest('input') && !e.target.closest('textarea')) {
+      e.stopPropagation();
+    }
+  }, true);
+  
+  panel.addEventListener('mouseup', (e) => {
+    if (!e.target.closest('button') && !e.target.closest('input') && !e.target.closest('textarea')) {
+      e.stopPropagation();
+    }
+  }, true);
   
   // Event listeners
   const closeBtn = document.getElementById('n8n-github-settings-close');
+  if (closeBtn) {
+    closeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleSettingsPanel();
+    });
+  }
+  
+  // Show list view by default
+  showInstanceListView();
+}
+
+// Show instance list view
+async function showInstanceListView() {
+  const body = document.getElementById('n8n-github-settings-body');
+  if (!body) return;
+  
+  try {
+    const response = await chrome.runtime.sendMessage({ action: 'getAllInstanceConfigs' });
+    const instances = (response && response.success && response.configs) ? response.configs : [];
+    const currentInstanceUrl = getInstanceUrl();
+    
+    let instancesHtml = '';
+    if (instances.length === 0) {
+      instancesHtml = '<p style="text-align: center; color: #6b7280; padding: 20px;">No instances configured. Click "Add New Instance" to get started.</p>';
+    } else {
+      instancesHtml = '<div class="n8n-instance-list">';
+      instances.forEach(inst => {
+        const normalizedUrl = normalizeInstanceUrl(inst.n8nUrl);
+        const isCurrent = normalizeInstanceUrl(currentInstanceUrl) === normalizedUrl;
+        const currentBadge = isCurrent ? '<span class="n8n-instance-current-badge">Current</span>' : '';
+        
+        instancesHtml += `
+          <div class="n8n-instance-item" data-n8n-ignore="true" data-no-workflow-import="true">
+            <div class="n8n-instance-info">
+              <div class="n8n-instance-url" data-n8n-ignore="true" data-no-workflow-import="true">${escapeHtml(inst.n8nUrl)} ${currentBadge}</div>
+              <div class="n8n-instance-details">
+                <span>Repo: ${escapeHtml(inst.githubRepo || 'Not set')}</span>
+                <span>Path: ${escapeHtml(inst.githubPathPattern || 'workflows/{workflow-name}.json')}</span>
+              </div>
+            </div>
+            <div class="n8n-instance-actions">
+              <button class="n8n-instance-edit-btn" data-instance-id="${inst.id}">Edit</button>
+              <button class="n8n-instance-delete-btn" data-instance-id="${inst.id}">Delete</button>
+            </div>
+          </div>
+        `;
+      });
+      instancesHtml += '</div>';
+    }
+    
+    body.innerHTML = `
+      <div style="margin-bottom: 16px;">
+        <button id="n8n-add-instance-btn" class="n8n-github-settings-save">+ Add New Instance</button>
+      </div>
+      ${instancesHtml}
+    `;
+    
+    // Event listeners
+    const addBtn = document.getElementById('n8n-add-instance-btn');
+    if (addBtn) {
+      addBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        log('Add New Instance button clicked');
+        showInstanceEditView(null);
+      });
+    }
+    
+    document.querySelectorAll('.n8n-instance-edit-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        const instanceId = e.target.getAttribute('data-instance-id');
+        log('Edit button clicked for instance:', instanceId);
+        showInstanceEditView(instanceId);
+      });
+    });
+    
+    document.querySelectorAll('.n8n-instance-delete-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        const instanceId = e.target.getAttribute('data-instance-id');
+        if (confirm('Are you sure you want to delete this instance configuration?')) {
+          await deleteInstance(instanceId);
+        }
+      });
+    });
+  } catch (error) {
+    log('Error loading instances:', error);
+    body.innerHTML = '<p style="color: #ef4444;">Error loading instances. Please try again.</p>';
+  }
+}
+
+// Normalize instance URL helper
+function normalizeInstanceUrl(url) {
+  try {
+    const urlObj = new URL(url);
+    return `${urlObj.protocol}//${urlObj.host}`;
+  } catch (e) {
+    const match = url.match(/^(https?:\/\/[^\/]+)/);
+    return match ? match[1] : url;
+  }
+}
+
+// Escape HTML to prevent XSS and n8n URL detection
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// Show instance edit view
+async function showInstanceEditView(instanceId) {
+  log('showInstanceEditView called with instanceId:', instanceId);
+  const body = document.getElementById('n8n-github-settings-body');
+  if (!body) {
+    log('Settings body not found!');
+    return;
+  }
+  
+  currentEditingInstanceId = instanceId;
+  let config = {
+    n8nUrl: '',
+    n8nApiKey: '',
+    githubRepo: '',
+    githubToken: '',
+    githubPathPattern: 'workflows/{workflow-name}.json',
+    commitMessage: 'Update workflow: {workflow-name}'
+  };
+  
+  if (instanceId) {
+    // Editing existing instance - load its config
+    try {
+      const response = await chrome.runtime.sendMessage({ 
+        action: 'getInstanceById',
+        instanceId: instanceId
+      });
+      if (response && response.success && response.config) {
+        config = response.config;
+      }
+    } catch (error) {
+      log('Error loading instance:', error);
+    }
+  } else {
+    // Adding new instance - auto-fill URL from current page
+    const currentUrl = getInstanceUrl();
+    config.n8nUrl = currentUrl;
+    
+    // Also try to load existing config for this URL (if it exists from legacy storage)
+    try {
+      const response = await chrome.runtime.sendMessage({ 
+        action: 'getConfig',
+        instanceUrl: currentUrl
+      });
+      if (response && response.success && response.config) {
+        const existingConfig = response.config;
+        // Only use existing config if it has actual values (not just defaults)
+        if (existingConfig.n8nApiKey || existingConfig.githubRepo || existingConfig.githubToken) {
+          config = {
+            ...config,
+            n8nApiKey: existingConfig.n8nApiKey || '',
+            githubRepo: existingConfig.githubRepo || '',
+            githubToken: existingConfig.githubToken || '',
+            githubPathPattern: existingConfig.githubPathPattern || config.githubPathPattern,
+            commitMessage: existingConfig.commitMessage || config.commitMessage
+          };
+        }
+      }
+    } catch (error) {
+      log('Error loading existing config:', error);
+    }
+  }
+  
+  const isNewInstance = !instanceId;
+  const urlReadonly = isNewInstance ? 'readonly' : '';
+  const urlNote = isNewInstance ? ' (auto-detected from current page)' : '';
+  
+  body.innerHTML = `
+    <div style="margin-bottom: 16px;" data-n8n-ignore="true" data-no-workflow-import="true">
+      <button id="n8n-back-to-list-btn" class="n8n-github-settings-cancel">← Back to List</button>
+    </div>
+    <div class="n8n-github-settings-field" data-n8n-ignore="true" data-no-workflow-import="true">
+      <label for="n8n-url">n8n Instance URL *${urlNote}</label>
+      <input type="text" id="n8n-url" placeholder="https://n8n.example.com or http://localhost:5678" value="${escapeHtml(config.n8nUrl || '')}" autocomplete="off" data-lpignore="true" data-n8n-ignore="true" data-no-workflow-import="true" ${urlReadonly} style="${urlReadonly ? 'background-color: #f3f4f6; cursor: not-allowed;' : ''}" />
+      <small>${isNewInstance ? 'Auto-detected from current page. You can edit this if needed.' : 'Base URL of your n8n instance'}</small>
+    </div>
+    
+    <div class="n8n-github-settings-field" data-n8n-ignore="true" data-no-workflow-import="true">
+      <label for="n8n-api-key">n8n API Key *</label>
+      <input type="password" id="n8n-api-key" placeholder="Your n8n API key" value="${escapeHtml(config.n8nApiKey || '')}" autocomplete="new-password" data-lpignore="true" data-n8n-ignore="true" data-no-workflow-import="true" />
+      <small>Found in n8n Settings > API</small>
+    </div>
+    
+    <div class="n8n-github-settings-field" data-n8n-ignore="true" data-no-workflow-import="true">
+      <label for="github-repo">GitHub Repository *</label>
+      <input type="text" id="github-repo" placeholder="owner/repo" value="${escapeHtml(config.githubRepo || '')}" autocomplete="off" data-lpignore="true" data-n8n-ignore="true" data-no-workflow-import="true" />
+      <small>Format: owner/repository-name</small>
+    </div>
+    
+    <div class="n8n-github-settings-field" data-n8n-ignore="true" data-no-workflow-import="true">
+      <label for="github-token">GitHub Personal Access Token *</label>
+      <input type="password" id="github-token" placeholder="ghp_xxxxxxxxxxxx" value="${escapeHtml(config.githubToken || '')}" autocomplete="new-password" data-lpignore="true" data-n8n-ignore="true" data-no-workflow-import="true" />
+      <small>Token with 'repo' scope. Create at: github.com/settings/tokens</small>
+    </div>
+    
+    <div class="n8n-github-settings-field" data-n8n-ignore="true" data-no-workflow-import="true">
+      <label for="github-path-pattern">GitHub Path Pattern</label>
+      <input type="text" id="github-path-pattern" placeholder="workflows/{workflow-name}.json" value="${escapeHtml(config.githubPathPattern || 'workflows/{workflow-name}.json')}" autocomplete="off" data-lpignore="true" data-n8n-ignore="true" data-no-workflow-import="true" />
+      <small>Use {workflow-name} and {workflow-id} as placeholders</small>
+    </div>
+    
+    <div class="n8n-github-settings-field" data-n8n-ignore="true" data-no-workflow-import="true">
+      <label for="commit-message">Commit Message</label>
+      <input type="text" id="commit-message" placeholder="Update workflow: {workflow-name}" value="${escapeHtml(config.commitMessage || 'Update workflow: {workflow-name}')}" autocomplete="off" data-lpignore="true" data-n8n-ignore="true" data-no-workflow-import="true" />
+      <small>Use {workflow-name} and {workflow-id} as placeholders. Leave empty for default.</small>
+    </div>
+    
+    <div class="n8n-github-settings-actions">
+      <button id="n8n-github-settings-save" class="n8n-github-settings-save">Save</button>
+      <button id="n8n-github-settings-cancel" class="n8n-github-settings-cancel">Cancel</button>
+    </div>
+    
+    <div id="n8n-github-settings-message" class="n8n-github-settings-message"></div>
+  `;
+  
+  // Event listeners
+  const backBtn = document.getElementById('n8n-back-to-list-btn');
   const cancelBtn = document.getElementById('n8n-github-settings-cancel');
   const saveBtn = document.getElementById('n8n-github-settings-save');
   
-  if (closeBtn) {
-    closeBtn.addEventListener('click', () => {
-      toggleSettingsPanel();
+  if (backBtn) {
+    backBtn.addEventListener('click', () => {
+      showInstanceListView();
     });
   }
   
   if (cancelBtn) {
     cancelBtn.addEventListener('click', () => {
-      toggleSettingsPanel();
+      showInstanceListView();
     });
   }
   
   if (saveBtn) {
     saveBtn.addEventListener('click', async () => {
-      await saveSettings();
+      await saveInstanceSettings();
     });
   }
+  
+  // Ensure all input fields are editable (prevent autofill from blocking)
+  // But keep URL field readonly for new instances
+  setTimeout(() => {
+    const inputs = body.querySelectorAll('input');
+    const urlInput = document.getElementById('n8n-url');
+    
+    inputs.forEach(input => {
+      // Skip URL field if it's a new instance (keep it readonly)
+      if (input === urlInput && isNewInstance) {
+        // Allow editing URL for new instances if user double-clicks or explicitly wants to change it
+        input.addEventListener('dblclick', function() {
+          this.readOnly = false;
+          this.removeAttribute('readonly');
+          this.style.backgroundColor = '';
+          this.style.cursor = '';
+          this.focus();
+          this.select();
+        });
+        return;
+      }
+      
+      // Remove readonly if it exists (for other fields)
+      input.removeAttribute('readonly');
+      // Ensure autocomplete is set
+      if (input.type === 'password') {
+        input.setAttribute('autocomplete', 'new-password');
+      } else {
+        input.setAttribute('autocomplete', 'off');
+      }
+      input.setAttribute('data-lpignore', 'true');
+      // Force editable
+      input.readOnly = false;
+      input.disabled = false;
+      
+      // Add focus handler to ensure field is editable when clicked
+      input.addEventListener('focus', function() {
+        this.readOnly = false;
+        this.removeAttribute('readonly');
+        // Select all text to make it easy to replace
+        if (this.value) {
+          setTimeout(() => this.select(), 10);
+        }
+      });
+    });
+  }, 100);
 }
 
-// Load settings from storage
-async function loadSettings() {
+// Delete instance
+async function deleteInstance(instanceId) {
   try {
-    log('Loading settings...');
-    const response = await chrome.runtime.sendMessage({ action: 'getConfig' });
-    log('Settings response:', response);
-    if (response && response.success && response.config) {
-      const config = response.config;
-      const urlInput = document.getElementById('n8n-url');
-      const keyInput = document.getElementById('n8n-api-key');
-      const repoInput = document.getElementById('github-repo');
-      const tokenInput = document.getElementById('github-token');
-      const pathInput = document.getElementById('github-path-pattern');
-      
-      if (urlInput) urlInput.value = config.n8nUrl || '';
-      if (keyInput) keyInput.value = config.n8nApiKey || '';
-      if (repoInput) repoInput.value = config.githubRepo || '';
-      if (tokenInput) tokenInput.value = config.githubToken || '';
-      if (pathInput) pathInput.value = config.githubPathPattern || 'workflows/{workflow-name}.json';
-      
-      log('Settings loaded');
+    const response = await chrome.runtime.sendMessage({
+      action: 'deleteInstance',
+      instanceId: instanceId
+    });
+    
+    if (response && response.success) {
+      showInstanceListView();
+    } else {
+      showSettingsMessage(`Error: ${response?.error || 'Failed to delete instance'}`, 'error');
     }
   } catch (error) {
-    log('Failed to load settings:', error);
-    console.error('Failed to load settings:', error);
+    log('Error deleting instance:', error);
+    showSettingsMessage(`Error: ${error.message}`, 'error');
   }
 }
 
-// Save settings to storage
-async function saveSettings() {
+// Save instance settings
+async function saveInstanceSettings() {
   const n8nUrl = document.getElementById('n8n-url')?.value.trim() || '';
   const n8nApiKey = document.getElementById('n8n-api-key')?.value.trim() || '';
   const githubRepo = document.getElementById('github-repo')?.value.trim() || '';
   const githubToken = document.getElementById('github-token')?.value.trim() || '';
   const githubPathPattern = document.getElementById('github-path-pattern')?.value.trim() || 'workflows/{workflow-name}.json';
-  
-  log('Saving settings...', { n8nUrl: n8nUrl ? '***' : '', hasApiKey: !!n8nApiKey, githubRepo, hasToken: !!githubToken });
+  const commitMessage = document.getElementById('commit-message')?.value.trim() || 'Update workflow: {workflow-name}';
   
   // Validation
   if (!n8nUrl) {
@@ -523,23 +798,35 @@ async function saveSettings() {
   }
   
   try {
-    const response = await chrome.runtime.sendMessage({
-      action: 'saveConfig',
-      config: {
-        n8nUrl,
-        n8nApiKey,
-        githubRepo,
-        githubToken,
-        githubPathPattern
-      }
-    });
+    const config = {
+      n8nUrl,
+      n8nApiKey,
+      githubRepo,
+      githubToken,
+      githubPathPattern,
+      commitMessage
+    };
     
-    log('Save settings response:', response);
+    let response;
+    if (currentEditingInstanceId) {
+      // Update existing instance
+      response = await chrome.runtime.sendMessage({
+        action: 'updateInstance',
+        instanceId: currentEditingInstanceId,
+        config: config
+      });
+    } else {
+      // Add new instance
+      response = await chrome.runtime.sendMessage({
+        action: 'addInstance',
+        config: config
+      });
+    }
     
     if (response && response.success) {
       showSettingsMessage('Settings saved successfully!', 'success');
       setTimeout(() => {
-        toggleSettingsPanel();
+        showInstanceListView();
       }, 1000);
     } else {
       showSettingsMessage(`Error: ${response?.error || 'Failed to save settings'}`, 'error');
@@ -549,6 +836,8 @@ async function saveSettings() {
     showSettingsMessage(`Error: ${error.message}`, 'error');
   }
 }
+
+// Legacy functions kept for backward compatibility (not used in new UI)
 
 // Toggle settings panel visibility
 function toggleSettingsPanel() {
@@ -564,7 +853,7 @@ function toggleSettingsPanel() {
   log('Settings panel toggled:', settingsVisible);
   
   if (settingsVisible) {
-    loadSettings();
+    showInstanceListView();
   }
 }
 
@@ -582,6 +871,129 @@ function showSettingsMessage(message, type) {
       }, 3000);
     }
   }
+}
+
+// Show commit message prompt and return the message (or null if cancelled)
+async function showCommitMessagePrompt(config) {
+  // Fetch workflow name for better default message
+  let workflowName = 'workflow';
+  const workflowId = getWorkflowId();
+  
+  if (config && config.n8nUrl && config.n8nApiKey && workflowId) {
+    try {
+      const n8nUrl = config.n8nUrl.replace(/\/$/, '');
+      const workflowUrl = `${n8nUrl}/api/v1/workflows/${workflowId}`;
+      const response = await fetch(workflowUrl, {
+        method: 'GET',
+        headers: {
+          'X-N8N-API-KEY': config.n8nApiKey,
+          'Content-Type': 'application/json'
+        }
+      });
+      if (response.ok) {
+        const workflowData = await response.json();
+        workflowName = workflowData.name || `workflow-${workflowId}`;
+      }
+    } catch (error) {
+      log('Could not fetch workflow name, using default:', error);
+    }
+  }
+  
+  // Build default message from template
+  const commitMessageTemplate = config?.commitMessage || 'Update workflow: {workflow-name}';
+  const defaultMessage = commitMessageTemplate
+    .replace('{workflow-name}', workflowName)
+    .replace('{workflow-id}', workflowId || '');
+  
+  return new Promise((resolve) => {
+    // Remove existing prompt if any
+    const existing = document.getElementById('n8n-github-commit-prompt');
+    if (existing) {
+      existing.remove();
+    }
+    
+    const prompt = document.createElement('div');
+    prompt.id = 'n8n-github-commit-prompt';
+    prompt.className = 'n8n-github-commit-prompt';
+    
+    prompt.innerHTML = `
+      <div class="n8n-github-commit-content">
+        <div class="n8n-github-commit-header">
+          <h3>Commit Message</h3>
+          <button class="n8n-github-commit-close" id="n8n-github-commit-close">×</button>
+        </div>
+        <div class="n8n-github-commit-body">
+          <div class="n8n-github-commit-field">
+            <label for="commit-message-input">Enter commit message (or use default):</label>
+            <textarea id="commit-message-input" rows="3" placeholder="${defaultMessage}">${defaultMessage}</textarea>
+            <small>Leave as is to use the default, or edit to customize</small>
+          </div>
+          <div class="n8n-github-commit-actions">
+            <button id="n8n-github-commit-push" class="n8n-github-commit-push">Push to GitHub</button>
+            <button id="n8n-github-commit-cancel" class="n8n-github-commit-cancel">Cancel</button>
+          </div>
+        </div>
+      </div>
+    `;
+    
+    document.body.appendChild(prompt);
+    
+    // Show prompt
+    setTimeout(() => {
+      prompt.style.display = 'flex';
+      const textarea = document.getElementById('commit-message-input');
+      if (textarea) {
+        textarea.focus();
+        textarea.select();
+      }
+    }, 10);
+    
+    // Event listeners
+    const closeBtn = document.getElementById('n8n-github-commit-close');
+    const cancelBtn = document.getElementById('n8n-github-commit-cancel');
+    const pushBtn = document.getElementById('n8n-github-commit-push');
+    const textarea = document.getElementById('commit-message-input');
+    
+    const cleanup = () => {
+      prompt.style.display = 'none';
+      setTimeout(() => prompt.remove(), 300);
+    };
+    
+    const handlePush = () => {
+      const message = textarea?.value.trim() || defaultMessage;
+      cleanup();
+      resolve(message);
+    };
+    
+    const handleCancel = () => {
+      cleanup();
+      resolve(null);
+    };
+    
+    if (closeBtn) closeBtn.addEventListener('click', handleCancel);
+    if (cancelBtn) cancelBtn.addEventListener('click', handleCancel);
+    if (pushBtn) pushBtn.addEventListener('click', handlePush);
+    
+    // Handle Enter key (Ctrl+Enter to submit, Escape to cancel)
+    if (textarea) {
+      textarea.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+          e.preventDefault();
+          handlePush();
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          handleCancel();
+        }
+      });
+    }
+    
+    // Close on backdrop click
+    prompt.addEventListener('click', (e) => {
+      if (e.target === prompt) {
+        handleCancel();
+      }
+    });
+  });
 }
 
 // Show notification toast

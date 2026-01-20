@@ -208,6 +208,115 @@
   background: #e5e7eb;
 }
 
+/* Instance List Styles */
+.n8n-instance-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Prevent n8n from detecting URLs in settings panel */
+[data-n8n-ignore="true"],
+[data-no-workflow-import="true"] {
+  pointer-events: auto;
+}
+
+[data-n8n-ignore="true"] a,
+[data-no-workflow-import="true"] a {
+  pointer-events: none;
+  text-decoration: none;
+  color: inherit;
+}
+
+.n8n-instance-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.n8n-instance-item:hover {
+  background: #f3f4f6;
+  border-color: #d1d5db;
+}
+
+.n8n-instance-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.n8n-instance-url {
+  font-weight: 600;
+  color: #1f2937;
+  font-size: 14px;
+  margin-bottom: 6px;
+  word-break: break-all;
+  pointer-events: none;
+  user-select: text;
+  cursor: text;
+}
+
+.n8n-instance-current-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  background: #10b981;
+  color: white;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.n8n-instance-details {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.n8n-instance-details span {
+  white-space: nowrap;
+}
+
+.n8n-instance-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: 16px;
+}
+
+.n8n-instance-edit-btn,
+.n8n-instance-delete-btn {
+  padding: 6px 12px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.n8n-instance-edit-btn {
+  background: #6366f1;
+  color: white;
+}
+
+.n8n-instance-edit-btn:hover {
+  background: #4f46e5;
+}
+
+.n8n-instance-delete-btn {
+  background: #ef4444;
+  color: white;
+}
+
+.n8n-instance-delete-btn:hover {
+  background: #dc2626;
+}
+
 .n8n-github-settings-message {
   margin-top: 16px;
   padding: 12px;
@@ -265,6 +374,143 @@
   color: white;
 }
 
+/* Commit Message Prompt */
+.n8n-github-commit-prompt {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  backdrop-filter: blur(2px);
+}
+
+.n8n-github-commit-content {
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+  width: 90%;
+  max-width: 500px;
+  animation: slideIn 0.2s ease;
+}
+
+.n8n-github-commit-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.n8n-github-commit-header h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.n8n-github-commit-close {
+  background: none;
+  border: none;
+  font-size: 28px;
+  color: #6b7280;
+  cursor: pointer;
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: background-color 0.2s ease;
+}
+
+.n8n-github-commit-close:hover {
+  background: #f3f4f6;
+  color: #1f2937;
+}
+
+.n8n-github-commit-body {
+  padding: 20px;
+}
+
+.n8n-github-commit-field {
+  margin-bottom: 20px;
+}
+
+.n8n-github-commit-field label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 500;
+  color: #374151;
+  font-size: 14px;
+}
+
+.n8n-github-commit-field textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 14px;
+  font-family: inherit;
+  resize: vertical;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  box-sizing: border-box;
+}
+
+.n8n-github-commit-field textarea:focus {
+  outline: none;
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+
+.n8n-github-commit-field small {
+  display: block;
+  margin-top: 4px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.n8n-github-commit-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.n8n-github-commit-push,
+.n8n-github-commit-cancel {
+  flex: 1;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.n8n-github-commit-push {
+  background: #6366f1;
+  color: white;
+}
+
+.n8n-github-commit-push:hover {
+  background: #4f46e5;
+}
+
+.n8n-github-commit-cancel {
+  background: #f3f4f6;
+  color: #374151;
+}
+
+.n8n-github-commit-cancel:hover {
+  background: #e5e7eb;
+}
+
 /* Dark mode support (if n8n uses dark mode) */
 @media (prefers-color-scheme: dark) {
   .n8n-github-settings-content {
@@ -314,6 +560,73 @@
   
   .n8n-github-settings-cancel:hover {
     background: #4b5563;
+  }
+  
+  .n8n-github-commit-content {
+    background: #1f2937;
+    color: #f9fafb;
+  }
+  
+  .n8n-github-commit-header {
+    border-bottom-color: #374151;
+  }
+  
+  .n8n-github-commit-header h3 {
+    color: #f9fafb;
+  }
+  
+  .n8n-github-commit-close {
+    color: #9ca3af;
+  }
+  
+  .n8n-github-commit-close:hover {
+    background: #374151;
+    color: #f9fafb;
+  }
+  
+  .n8n-github-commit-field label {
+    color: #e5e7eb;
+  }
+  
+  .n8n-github-commit-field textarea {
+    background: #111827;
+    border-color: #374151;
+    color: #f9fafb;
+  }
+  
+  .n8n-github-commit-field textarea:focus {
+    border-color: #6366f1;
+  }
+  
+  .n8n-github-commit-field small {
+    color: #9ca3af;
+  }
+  
+  .n8n-github-commit-cancel {
+    background: #374151;
+    color: #e5e7eb;
+  }
+  
+  .n8n-github-commit-cancel:hover {
+    background: #4b5563;
+  }
+  
+  .n8n-instance-item {
+    background: #111827;
+    border-color: #374151;
+  }
+  
+  .n8n-instance-item:hover {
+    background: #1f2937;
+    border-color: #4b5563;
+  }
+  
+  .n8n-instance-url {
+    color: #f9fafb;
+  }
+  
+  .n8n-instance-details {
+    color: #9ca3af;
   }
 }
 

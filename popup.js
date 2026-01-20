@@ -1,9 +1,75 @@
 // Popup script for n8n GitHub Backup Extension
 
+let currentInstanceUrl = null;
+
+// Get current tab's URL to detect instance
+async function getCurrentInstanceUrl() {
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tabs[0] && tabs[0].url) {
+      try {
+        const url = new URL(tabs[0].url);
+        return `${url.protocol}//${url.host}`;
+      } catch (e) {
+        return null;
+      }
+    }
+  } catch (error) {
+    console.error('Error getting current tab:', error);
+  }
+  return null;
+}
+
+// Load all instances and populate selector
+async function loadInstances() {
+  try {
+    const response = await chrome.runtime.sendMessage({ action: 'getAllInstances' });
+    const instances = (response && response.success && response.instances) ? response.instances : [];
+    
+    const selector = document.getElementById('instance-selector');
+    const selectorField = document.getElementById('instance-selector-field');
+    
+    if (instances.length > 0) {
+      selectorField.style.display = 'block';
+      selector.innerHTML = '<option value="">Select instance...</option>';
+      instances.forEach(url => {
+        const option = document.createElement('option');
+        option.value = url;
+        option.textContent = url;
+        selector.appendChild(option);
+      });
+      
+      // Set current instance if available
+      const currentUrl = await getCurrentInstanceUrl();
+      if (currentUrl && instances.includes(currentUrl)) {
+        selector.value = currentUrl;
+        currentInstanceUrl = currentUrl;
+      }
+      
+      selector.addEventListener('change', (e) => {
+        currentInstanceUrl = e.target.value || null;
+        loadSettings();
+      });
+    } else {
+      selectorField.style.display = 'none';
+    }
+  } catch (error) {
+    console.error('Error loading instances:', error);
+  }
+}
+
 // Load existing settings
 async function loadSettings() {
   try {
-    const response = await chrome.runtime.sendMessage({ action: 'getConfig' });
+    // If no instance selected, try to get current tab's instance
+    if (!currentInstanceUrl) {
+      currentInstanceUrl = await getCurrentInstanceUrl();
+    }
+    
+    const response = await chrome.runtime.sendMessage({ 
+      action: 'getConfig',
+      instanceUrl: currentInstanceUrl
+    });
     if (response && response.success && response.config) {
       const config = response.config;
       document.getElementById('n8n-url').value = config.n8nUrl || '';
@@ -11,6 +77,7 @@ async function loadSettings() {
       document.getElementById('github-repo').value = config.githubRepo || '';
       document.getElementById('github-token').value = config.githubToken || '';
       document.getElementById('github-path-pattern').value = config.githubPathPattern || 'workflows/{workflow-name}.json';
+      document.getElementById('commit-message').value = config.commitMessage || 'Update workflow: {workflow-name}';
     }
   } catch (error) {
     console.error('Failed to load settings:', error);
@@ -25,6 +92,7 @@ async function saveSettings() {
   const githubRepo = document.getElementById('github-repo').value.trim();
   const githubToken = document.getElementById('github-token').value.trim();
   const githubPathPattern = document.getElementById('github-path-pattern').value.trim() || 'workflows/{workflow-name}.json';
+  const commitMessage = document.getElementById('commit-message').value.trim() || 'Update workflow: {workflow-name}';
   
   // Validation
   if (!n8nUrl) {
@@ -47,6 +115,11 @@ async function saveSettings() {
     return;
   }
   
+  // If no instance selected, try to get current tab's instance
+  if (!currentInstanceUrl) {
+    currentInstanceUrl = await getCurrentInstanceUrl();
+  }
+  
   try {
     const response = await chrome.runtime.sendMessage({
       action: 'saveConfig',
@@ -55,8 +128,10 @@ async function saveSettings() {
         n8nApiKey,
         githubRepo,
         githubToken,
-        githubPathPattern
-      }
+        githubPathPattern,
+        commitMessage
+      },
+      instanceUrl: currentInstanceUrl
     });
     
     if (response && response.success) {
@@ -139,6 +214,8 @@ function showMessage(message, type) {
 document.getElementById('save-btn').addEventListener('click', saveSettings);
 document.getElementById('test-btn').addEventListener('click', testConnection);
 
-// Load settings on popup open
-loadSettings();
+// Load instances and settings on popup open
+loadInstances().then(() => {
+  loadSettings();
+});
 

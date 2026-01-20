@@ -123,6 +123,20 @@
     <small>Use {workflow-name} and {workflow-id} as placeholders</small>
   </div>
   
+  <div class="field">
+    <label for="commit-message">Commit Message</label>
+    <input type="text" id="commit-message" placeholder="Update workflow: {workflow-name}" />
+    <small>Use {workflow-name} and {workflow-id} as placeholders. Leave empty for default.</small>
+  </div>
+  
+  <div class="field" id="instance-selector-field" style="display: none;">
+    <label for="instance-selector">n8n Instance</label>
+    <select id="instance-selector" style="width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; box-sizing: border-box;">
+      <option value="">Select instance...</option>
+    </select>
+    <small>Select which n8n instance to configure</small>
+  </div>
+  
   <div class="actions">
     <button id="save-btn" class="save">Save</button>
     <button id="test-btn" class="test">Test Connection</button>

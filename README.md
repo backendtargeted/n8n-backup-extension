@@ -8,7 +8,8 @@ A Chrome/Edge browser extension that adds a "Push to GitHub" button to your n8n 
 - 🔒 **Secure Storage**: API keys stored locally using Chrome's secure storage
 - 🔄 **Smart Updates**: Automatically updates existing files using GitHub's SHA-based versioning
 - ⚙️ **Easy Configuration**: Inline settings panel accessible from n8n
-- 🌐 **Multi-Instance Support**: Configure different GitHub repositories for different n8n instances
+- 🌐 **Multi-Instance Support**: Automatically stores separate settings for each n8n instance based on URL
+- 📝 **Custom Commit Messages**: Configure commit message templates with placeholders
 
 ## Installation
 
@@ -65,12 +66,17 @@ A Chrome/Edge browser extension that adds a "Push to GitHub" button to your n8n 
    - **GitHub Path Pattern**: Default is `workflows/{workflow-name}.json`
      - Use `{workflow-name}` for the workflow name
      - Use `{workflow-id}` for the workflow ID
+   - **Commit Message**: Custom commit message template (optional)
+     - Use `{workflow-name}` and `{workflow-id}` as placeholders
+     - Default: `Update workflow: {workflow-name}`
 4. Click **Save**
+
+**Note**: Settings are automatically stored per n8n instance. Each instance URL (e.g., `https://n8n.example.com`) has its own separate configuration. This allows you to use different GitHub repositories for different n8n instances.
 
 ## Usage
 
 1. Open any workflow in n8n
-2. Click the **🚀 Push to GitHub** button (appears in the header)
+2. Click the **Push to GitHub** button (appears above the bottom bar)
 3. The extension will:
    - Fetch the workflow JSON from n8n API
    - Check if the file exists in GitHub
@@ -85,6 +91,27 @@ The path pattern determines where workflows are stored in your repository. Examp
 - `backups/{workflow-id}.json` - Stores in `backups/` folder with workflow ID
 - `{workflow-name}/{workflow-name}.json` - Creates a folder per workflow
 - `workflows/{year}/{month}/{workflow-name}.json` - Organizes by date (requires custom logic)
+
+## Commit Messages
+
+You can customize the commit message used when pushing workflows to GitHub. The commit message supports placeholders:
+
+- `{workflow-name}` - Replaced with the workflow name
+- `{workflow-id}` - Replaced with the workflow ID
+
+Examples:
+- `Update workflow: {workflow-name}` - Default message
+- `Backup: {workflow-name} ({workflow-id})` - Include both name and ID
+- `[n8n] {workflow-name}` - Add a prefix
+
+## Multi-Instance Support
+
+The extension automatically detects which n8n instance you're using based on the URL and stores separate settings for each instance. This means:
+
+- You can configure different GitHub repositories for different n8n instances
+- Settings for `https://n8n.example.com` are separate from `http://localhost:5678`
+- The extension automatically loads the correct settings when you visit each instance
+- You can manage multiple instances from the extension popup (click the extension icon)
 
 ## Security Notes
 
