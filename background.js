@@ -649,8 +649,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
   
   if (request.action === 'importWorkflowToN8n') {
-    importWorkflowToN8n(request.instanceUrl, request.workflowData, request.workflowName)
+    importWorkflowToN8n(request.instanceUrl, request.workflowData, request.workflowName, request.workflowId)
       .then(result => sendResponse({ success: true, ...result }))
+      .catch(error => sendResponse({ success: false, error: sanitizeError(error, DEBUG) }));
+    return true;
+  }
+  
+  if (request.action === 'listN8nWorkflows') {
+    listN8nWorkflows(request.instanceUrl)
+      .then(workflows => sendResponse({ success: true, workflows }))
       .catch(error => sendResponse({ success: false, error: sanitizeError(error, DEBUG) }));
     return true;
   }
@@ -1481,6 +1488,30 @@ async function pullWorkflowFromGitHub(instanceUrl, filePath, branch) {
   
   const targetBranch = branch || config.defaultBranch || 'main';
   return await getWorkflowFile(owner, repo, filePath, targetBranch, config.githubToken);
+}
+
+// List all workflows from n8n
+async function listN8nWorkflows(instanceUrl) {
+  const config = await getConfig(instanceUrl);
+  
+  if (!config.n8nUrl || !config.n8nApiKey) {
+    throw new Error('n8n URL or API key not configured');
+  }
+  
+  const url = `${config.n8nUrl.replace(/\/$/, '')}/api/v1/workflows`;
+  const response = await fetch(url, {
+    headers: {
+      'X-N8N-API-KEY': config.n8nApiKey,
+      'Content-Type': 'application/json'
+    }
+  });
+  
+  if (!response.ok) {
+    throw new Error(`Failed to list workflows: ${response.status}`);
+  }
+  
+  const workflows = await response.json();
+  return workflows.data || [];
 }
 
 // Find workflow by name in n8n
