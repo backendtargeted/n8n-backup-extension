@@ -394,67 +394,437 @@ function createSettingsButton() {
 }
 
 let currentEditingInstanceId = null;
+let settingsPanelShadowRoot = null;
 
-// Inject settings panel
-function injectSettingsPanel() {
-  if (document.getElementById('n8n-github-settings-panel')) {
-    log('Settings panel already exists');
+// Get or create settings panel shadow root
+function getSettingsPanelShadowRoot() {
+  if (settingsPanelShadowRoot) {
+    return settingsPanelShadowRoot;
+  }
+  
+  // Check if host element already exists
+  let host = document.getElementById('n8n-github-settings-panel-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'n8n-github-settings-panel-host';
+    host.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 10000; pointer-events: none;';
+    document.body.appendChild(host);
+  }
+  
+  // Create shadow root if it doesn't exist
+  if (!host.shadowRoot) {
+    settingsPanelShadowRoot = host.attachShadow({ mode: 'open' });
+    log('Shadow root created for settings panel');
+  } else {
+    settingsPanelShadowRoot = host.shadowRoot;
+  }
+  
+  return settingsPanelShadowRoot;
+}
+
+// Inject CSS into shadow DOM
+function injectSettingsStyles(shadowRoot) {
+  // Check if styles already injected
+  if (shadowRoot.querySelector('style#n8n-settings-styles')) {
     return;
   }
   
-  log('Injecting settings panel...');
+  // Read styles from the CSS file (we'll inline them)
+  // For now, we'll create a style element with all the necessary styles
+  const style = document.createElement('style');
+  style.id = 'n8n-settings-styles';
+  style.textContent = `
+    .n8n-github-settings-panel {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.5);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      backdrop-filter: blur(2px);
+      pointer-events: auto;
+    }
+    
+    .n8n-github-settings-content {
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+      width: 90%;
+      max-width: 600px;
+      max-height: 90vh;
+      overflow-y: auto;
+      animation: slideIn 0.2s ease;
+    }
+    
+    @keyframes slideIn {
+      from {
+        opacity: 0;
+        transform: translateY(-20px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+    
+    .n8n-github-settings-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 20px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    
+    .n8n-github-settings-header h3 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 600;
+      color: #1f2937;
+    }
+    
+    .n8n-github-settings-close {
+      background: none;
+      border: none;
+      font-size: 28px;
+      color: #6b7280;
+      cursor: pointer;
+      padding: 0;
+      width: 32px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
+      transition: background-color 0.2s ease;
+    }
+    
+    .n8n-github-settings-close:hover {
+      background: #f3f4f6;
+      color: #1f2937;
+    }
+    
+    .n8n-github-settings-body {
+      padding: 20px;
+    }
+    
+    .n8n-github-settings-field {
+      margin-bottom: 20px;
+    }
+    
+    .n8n-github-settings-field label {
+      display: block;
+      margin-bottom: 6px;
+      font-weight: 500;
+      color: #374151;
+      font-size: 14px;
+    }
+    
+    .n8n-github-settings-field input,
+    .n8n-github-settings-field textarea {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-size: 14px;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+      box-sizing: border-box;
+      font-family: inherit;
+    }
+    
+    .n8n-github-settings-field textarea {
+      resize: vertical;
+    }
+    
+    .n8n-github-settings-field input:focus,
+    .n8n-github-settings-field textarea:focus {
+      outline: none;
+      border-color: #6366f1;
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+    }
+    
+    .n8n-github-settings-field small {
+      display: block;
+      margin-top: 4px;
+      color: #6b7280;
+      font-size: 12px;
+    }
+    
+    .n8n-github-settings-actions {
+      display: flex;
+      gap: 12px;
+      margin-top: 24px;
+    }
+    
+    .n8n-github-settings-save,
+    .n8n-github-settings-cancel {
+      flex: 1;
+      padding: 10px 16px;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background-color 0.2s ease;
+    }
+    
+    .n8n-github-settings-save {
+      background: #6366f1;
+      color: white;
+    }
+    
+    .n8n-github-settings-save:hover {
+      background: #4f46e5;
+    }
+    
+    .n8n-github-settings-save:active {
+      background: #4338ca;
+    }
+    
+    .n8n-github-settings-cancel {
+      background: #f3f4f6;
+      color: #374151;
+    }
+    
+    .n8n-github-settings-cancel:hover {
+      background: #e5e7eb;
+    }
+    
+    .n8n-instance-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    
+    .n8n-instance-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      background: #f9fafb;
+      transition: background-color 0.2s ease, border-color 0.2s ease;
+    }
+    
+    .n8n-instance-item:hover {
+      background: #f3f4f6;
+      border-color: #d1d5db;
+    }
+    
+    .n8n-instance-info {
+      flex: 1;
+      min-width: 0;
+    }
+    
+    .n8n-instance-url {
+      font-weight: 600;
+      color: #1f2937;
+      font-size: 14px;
+      margin-bottom: 6px;
+      word-break: break-all;
+      pointer-events: none;
+      user-select: text;
+      cursor: text;
+    }
+    
+    .n8n-instance-current-badge {
+      display: inline-block;
+      margin-left: 8px;
+      padding: 2px 8px;
+      background: #10b981;
+      color: white;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+    
+    .n8n-instance-details {
+      display: flex;
+      gap: 16px;
+      font-size: 12px;
+      color: #6b7280;
+    }
+    
+    .n8n-instance-details span {
+      white-space: nowrap;
+    }
+    
+    .n8n-instance-actions {
+      display: flex;
+      gap: 8px;
+      margin-left: 16px;
+    }
+    
+    .n8n-instance-edit-btn,
+    .n8n-instance-delete-btn {
+      padding: 6px 12px;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background-color 0.2s ease;
+    }
+    
+    .n8n-instance-edit-btn {
+      background: #6366f1;
+      color: white;
+    }
+    
+    .n8n-instance-edit-btn:hover {
+      background: #4f46e5;
+    }
+    
+    .n8n-instance-delete-btn {
+      background: #ef4444;
+      color: white;
+    }
+    
+    .n8n-instance-delete-btn:hover {
+      background: #dc2626;
+    }
+    
+    .n8n-github-settings-message {
+      margin-top: 16px;
+      padding: 12px;
+      border-radius: 6px;
+      font-size: 14px;
+      display: none;
+    }
+    
+    .n8n-github-settings-message.success {
+      background: #d1fae5;
+      color: #065f46;
+      border: 1px solid #6ee7b7;
+    }
+    
+    .n8n-github-settings-message.error {
+      background: #fee2e2;
+      color: #991b1b;
+      border: 1px solid #fca5a5;
+    }
+    
+    @media (prefers-color-scheme: dark) {
+      .n8n-github-settings-content {
+        background: #1f2937;
+        color: #f9fafb;
+      }
+      
+      .n8n-github-settings-header {
+        border-bottom-color: #374151;
+      }
+      
+      .n8n-github-settings-header h3 {
+        color: #f9fafb;
+      }
+      
+      .n8n-github-settings-close {
+        color: #9ca3af;
+      }
+      
+      .n8n-github-settings-close:hover {
+        background: #374151;
+        color: #f9fafb;
+      }
+      
+      .n8n-github-settings-field label {
+        color: #e5e7eb;
+      }
+      
+      .n8n-github-settings-field input,
+      .n8n-github-settings-field textarea {
+        background: #111827;
+        border-color: #374151;
+        color: #f9fafb;
+      }
+      
+      .n8n-github-settings-field input:focus,
+      .n8n-github-settings-field textarea:focus {
+        border-color: #6366f1;
+      }
+      
+      .n8n-github-settings-field small {
+        color: #9ca3af;
+      }
+      
+      .n8n-github-settings-cancel {
+        background: #374151;
+        color: #e5e7eb;
+      }
+      
+      .n8n-github-settings-cancel:hover {
+        background: #4b5563;
+      }
+      
+      .n8n-instance-item {
+        background: #111827;
+        border-color: #374151;
+      }
+      
+      .n8n-instance-item:hover {
+        background: #1f2937;
+        border-color: #4b5563;
+      }
+      
+      .n8n-instance-url {
+        color: #f9fafb;
+      }
+      
+      .n8n-instance-details {
+        color: #9ca3af;
+      }
+    }
+  `;
   
+  shadowRoot.appendChild(style);
+}
+
+// Inject settings panel
+function injectSettingsPanel() {
+  const shadowRoot = getSettingsPanelShadowRoot();
+  
+  // Check if panel already exists in shadow DOM
+  if (shadowRoot.getElementById('n8n-github-settings-panel')) {
+    log('Settings panel already exists in shadow DOM');
+    return;
+  }
+  
+  log('Injecting settings panel into shadow DOM...');
+  
+  // Inject styles
+  injectSettingsStyles(shadowRoot);
+  
+  // Create panel
   const panel = document.createElement('div');
   panel.id = 'n8n-github-settings-panel';
   panel.className = 'n8n-github-settings-panel';
   panel.style.display = 'none';
-  // Prevent n8n from detecting this as a workflow import
-  panel.setAttribute('data-n8n-ignore', 'true');
-  panel.setAttribute('data-no-workflow-import', 'true');
   
   panel.innerHTML = `
-    <div class="n8n-github-settings-content" data-n8n-ignore="true" data-no-workflow-import="true">
+    <div class="n8n-github-settings-content">
       <div class="n8n-github-settings-header">
         <div>
           <h3>n8n GitHub Backup Settings</h3>
         </div>
         <button class="n8n-github-settings-close" id="n8n-github-settings-close">×</button>
       </div>
-      <div class="n8n-github-settings-body" id="n8n-github-settings-body" data-n8n-ignore="true" data-no-workflow-import="true">
+      <div class="n8n-github-settings-body" id="n8n-github-settings-body">
         <!-- Content will be dynamically loaded -->
       </div>
     </div>
   `;
   
-  document.body.appendChild(panel);
-  log('Settings panel injected');
-  
-  // Prevent n8n from intercepting events in the settings panel
-  // But allow clicks on buttons and inputs within the panel
-  panel.addEventListener('click', (e) => {
-    // Only stop propagation if it's not a button or input
-    if (!e.target.closest('button') && !e.target.closest('input') && !e.target.closest('textarea')) {
-      e.stopPropagation();
-    }
-  }, true);
-  
-  panel.addEventListener('mousedown', (e) => {
-    if (!e.target.closest('button') && !e.target.closest('input') && !e.target.closest('textarea')) {
-      e.stopPropagation();
-    }
-  }, true);
-  
-  panel.addEventListener('mouseup', (e) => {
-    if (!e.target.closest('button') && !e.target.closest('input') && !e.target.closest('textarea')) {
-      e.stopPropagation();
-    }
-  }, true);
+  shadowRoot.appendChild(panel);
+  log('Settings panel injected into shadow DOM');
   
   // Event listeners
-  const closeBtn = document.getElementById('n8n-github-settings-close');
+  const closeBtn = shadowRoot.getElementById('n8n-github-settings-close');
   if (closeBtn) {
-    closeBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
+    closeBtn.addEventListener('click', () => {
       toggleSettingsPanel();
     });
   }
@@ -465,7 +835,8 @@ function injectSettingsPanel() {
 
 // Show instance list view
 async function showInstanceListView() {
-  const body = document.getElementById('n8n-github-settings-body');
+  const shadowRoot = getSettingsPanelShadowRoot();
+  const body = shadowRoot.getElementById('n8n-github-settings-body');
   if (!body) return;
   
   try {
@@ -484,9 +855,9 @@ async function showInstanceListView() {
         const currentBadge = isCurrent ? '<span class="n8n-instance-current-badge">Current</span>' : '';
         
         instancesHtml += `
-          <div class="n8n-instance-item" data-n8n-ignore="true" data-no-workflow-import="true">
+          <div class="n8n-instance-item">
             <div class="n8n-instance-info">
-              <div class="n8n-instance-url" data-n8n-ignore="true" data-no-workflow-import="true">${escapeHtml(inst.n8nUrl)} ${currentBadge}</div>
+              <div class="n8n-instance-url">${escapeHtml(inst.n8nUrl)} ${currentBadge}</div>
               <div class="n8n-instance-details">
                 <span>Repo: ${escapeHtml(inst.githubRepo || 'Not set')}</span>
                 <span>Path: ${escapeHtml(inst.githubPathPattern || 'workflows/{workflow-name}.json')}</span>
@@ -510,30 +881,24 @@ async function showInstanceListView() {
     `;
     
     // Event listeners
-    const addBtn = document.getElementById('n8n-add-instance-btn');
+    const addBtn = shadowRoot.getElementById('n8n-add-instance-btn');
     if (addBtn) {
-      addBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        e.preventDefault();
+      addBtn.addEventListener('click', () => {
         log('Add New Instance button clicked');
         showInstanceEditView(null);
       });
     }
     
-    document.querySelectorAll('.n8n-instance-edit-btn').forEach(btn => {
+    shadowRoot.querySelectorAll('.n8n-instance-edit-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        e.preventDefault();
         const instanceId = e.target.getAttribute('data-instance-id');
         log('Edit button clicked for instance:', instanceId);
         showInstanceEditView(instanceId);
       });
     });
     
-    document.querySelectorAll('.n8n-instance-delete-btn').forEach(btn => {
+    shadowRoot.querySelectorAll('.n8n-instance-delete-btn').forEach(btn => {
       btn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        e.preventDefault();
         const instanceId = e.target.getAttribute('data-instance-id');
         if (confirm('Are you sure you want to delete this instance configuration?')) {
           await deleteInstance(instanceId);
@@ -567,7 +932,8 @@ function escapeHtml(text) {
 // Show instance edit view
 async function showInstanceEditView(instanceId) {
   log('showInstanceEditView called with instanceId:', instanceId);
-  const body = document.getElementById('n8n-github-settings-body');
+  const shadowRoot = getSettingsPanelShadowRoot();
+  const body = shadowRoot.getElementById('n8n-github-settings-body');
   if (!body) {
     log('Settings body not found!');
     return;
@@ -631,42 +997,42 @@ async function showInstanceEditView(instanceId) {
   const urlNote = isNewInstance ? ' (auto-detected from current page)' : '';
   
   body.innerHTML = `
-    <div style="margin-bottom: 16px;" data-n8n-ignore="true" data-no-workflow-import="true">
+    <div style="margin-bottom: 16px;">
       <button id="n8n-back-to-list-btn" class="n8n-github-settings-cancel">← Back to List</button>
     </div>
-    <div class="n8n-github-settings-field" data-n8n-ignore="true" data-no-workflow-import="true">
+    <div class="n8n-github-settings-field">
       <label for="n8n-url">n8n Instance URL *${urlNote}</label>
-      <input type="text" id="n8n-url" placeholder="https://n8n.example.com or http://localhost:5678" value="${escapeHtml(config.n8nUrl || '')}" autocomplete="off" data-lpignore="true" data-n8n-ignore="true" data-no-workflow-import="true" ${urlReadonly} style="${urlReadonly ? 'background-color: #f3f4f6; cursor: not-allowed;' : ''}" />
+      <input type="text" id="n8n-url" placeholder="https://n8n.example.com or http://localhost:5678" value="${escapeHtml(config.n8nUrl || '')}" autocomplete="off" data-lpignore="true" ${urlReadonly} style="${urlReadonly ? 'background-color: #f3f4f6; cursor: not-allowed;' : ''}" />
       <small>${isNewInstance ? 'Auto-detected from current page. You can edit this if needed.' : 'Base URL of your n8n instance'}</small>
     </div>
     
-    <div class="n8n-github-settings-field" data-n8n-ignore="true" data-no-workflow-import="true">
+    <div class="n8n-github-settings-field">
       <label for="n8n-api-key">n8n API Key *</label>
-      <input type="password" id="n8n-api-key" placeholder="Your n8n API key" value="${escapeHtml(config.n8nApiKey || '')}" autocomplete="new-password" data-lpignore="true" data-n8n-ignore="true" data-no-workflow-import="true" />
+      <input type="password" id="n8n-api-key" placeholder="Your n8n API key" value="${escapeHtml(config.n8nApiKey || '')}" autocomplete="new-password" data-lpignore="true" />
       <small>Found in n8n Settings > API</small>
     </div>
     
-    <div class="n8n-github-settings-field" data-n8n-ignore="true" data-no-workflow-import="true">
+    <div class="n8n-github-settings-field">
       <label for="github-repo">GitHub Repository *</label>
-      <input type="text" id="github-repo" placeholder="owner/repo" value="${escapeHtml(config.githubRepo || '')}" autocomplete="off" data-lpignore="true" data-n8n-ignore="true" data-no-workflow-import="true" />
+      <input type="text" id="github-repo" placeholder="owner/repo" value="${escapeHtml(config.githubRepo || '')}" autocomplete="off" data-lpignore="true" />
       <small>Format: owner/repository-name</small>
     </div>
     
-    <div class="n8n-github-settings-field" data-n8n-ignore="true" data-no-workflow-import="true">
+    <div class="n8n-github-settings-field">
       <label for="github-token">GitHub Personal Access Token *</label>
-      <input type="password" id="github-token" placeholder="ghp_xxxxxxxxxxxx" value="${escapeHtml(config.githubToken || '')}" autocomplete="new-password" data-lpignore="true" data-n8n-ignore="true" data-no-workflow-import="true" />
+      <input type="password" id="github-token" placeholder="ghp_xxxxxxxxxxxx" value="${escapeHtml(config.githubToken || '')}" autocomplete="new-password" data-lpignore="true" />
       <small>Token with 'repo' scope. Create at: github.com/settings/tokens</small>
     </div>
     
-    <div class="n8n-github-settings-field" data-n8n-ignore="true" data-no-workflow-import="true">
+    <div class="n8n-github-settings-field">
       <label for="github-path-pattern">GitHub Path Pattern</label>
-      <input type="text" id="github-path-pattern" placeholder="workflows/{workflow-name}.json" value="${escapeHtml(config.githubPathPattern || 'workflows/{workflow-name}.json')}" autocomplete="off" data-lpignore="true" data-n8n-ignore="true" data-no-workflow-import="true" />
+      <input type="text" id="github-path-pattern" placeholder="workflows/{workflow-name}.json" value="${escapeHtml(config.githubPathPattern || 'workflows/{workflow-name}.json')}" autocomplete="off" data-lpignore="true" />
       <small>Use {workflow-name} and {workflow-id} as placeholders</small>
     </div>
     
-    <div class="n8n-github-settings-field" data-n8n-ignore="true" data-no-workflow-import="true">
+    <div class="n8n-github-settings-field">
       <label for="commit-message">Commit Message</label>
-      <input type="text" id="commit-message" placeholder="Update workflow: {workflow-name}" value="${escapeHtml(config.commitMessage || 'Update workflow: {workflow-name}')}" autocomplete="off" data-lpignore="true" data-n8n-ignore="true" data-no-workflow-import="true" />
+      <input type="text" id="commit-message" placeholder="Update workflow: {workflow-name}" value="${escapeHtml(config.commitMessage || 'Update workflow: {workflow-name}')}" autocomplete="off" data-lpignore="true" />
       <small>Use {workflow-name} and {workflow-id} as placeholders. Leave empty for default.</small>
     </div>
     
@@ -679,9 +1045,9 @@ async function showInstanceEditView(instanceId) {
   `;
   
   // Event listeners
-  const backBtn = document.getElementById('n8n-back-to-list-btn');
-  const cancelBtn = document.getElementById('n8n-github-settings-cancel');
-  const saveBtn = document.getElementById('n8n-github-settings-save');
+  const backBtn = shadowRoot.getElementById('n8n-back-to-list-btn');
+  const cancelBtn = shadowRoot.getElementById('n8n-github-settings-cancel');
+  const saveBtn = shadowRoot.getElementById('n8n-github-settings-save');
   
   if (backBtn) {
     backBtn.addEventListener('click', () => {
@@ -705,7 +1071,7 @@ async function showInstanceEditView(instanceId) {
   // But keep URL field readonly for new instances
   setTimeout(() => {
     const inputs = body.querySelectorAll('input');
-    const urlInput = document.getElementById('n8n-url');
+    const urlInput = shadowRoot.getElementById('n8n-url');
     
     inputs.forEach(input => {
       // Skip URL field if it's a new instance (keep it readonly)
@@ -769,12 +1135,13 @@ async function deleteInstance(instanceId) {
 
 // Save instance settings
 async function saveInstanceSettings() {
-  const n8nUrl = document.getElementById('n8n-url')?.value.trim() || '';
-  const n8nApiKey = document.getElementById('n8n-api-key')?.value.trim() || '';
-  const githubRepo = document.getElementById('github-repo')?.value.trim() || '';
-  const githubToken = document.getElementById('github-token')?.value.trim() || '';
-  const githubPathPattern = document.getElementById('github-path-pattern')?.value.trim() || 'workflows/{workflow-name}.json';
-  const commitMessage = document.getElementById('commit-message')?.value.trim() || 'Update workflow: {workflow-name}';
+  const shadowRoot = getSettingsPanelShadowRoot();
+  const n8nUrl = shadowRoot.getElementById('n8n-url')?.value.trim() || '';
+  const n8nApiKey = shadowRoot.getElementById('n8n-api-key')?.value.trim() || '';
+  const githubRepo = shadowRoot.getElementById('github-repo')?.value.trim() || '';
+  const githubToken = shadowRoot.getElementById('github-token')?.value.trim() || '';
+  const githubPathPattern = shadowRoot.getElementById('github-path-pattern')?.value.trim() || 'workflows/{workflow-name}.json';
+  const commitMessage = shadowRoot.getElementById('commit-message')?.value.trim() || 'Update workflow: {workflow-name}';
   
   // Validation
   if (!n8nUrl) {
@@ -841,7 +1208,8 @@ async function saveInstanceSettings() {
 
 // Toggle settings panel visibility
 function toggleSettingsPanel() {
-  const panel = document.getElementById('n8n-github-settings-panel');
+  const shadowRoot = getSettingsPanelShadowRoot();
+  const panel = shadowRoot.getElementById('n8n-github-settings-panel');
   if (!panel) {
     log('Settings panel not found, injecting...');
     injectSettingsPanel();
@@ -850,6 +1218,13 @@ function toggleSettingsPanel() {
   
   settingsVisible = !settingsVisible;
   panel.style.display = settingsVisible ? 'flex' : 'none';
+  
+  // Also update host element pointer-events
+  const host = document.getElementById('n8n-github-settings-panel-host');
+  if (host) {
+    host.style.pointerEvents = settingsVisible ? 'auto' : 'none';
+  }
+  
   log('Settings panel toggled:', settingsVisible);
   
   if (settingsVisible) {
@@ -859,7 +1234,8 @@ function toggleSettingsPanel() {
 
 // Show message in settings panel
 function showSettingsMessage(message, type) {
-  const messageEl = document.getElementById('n8n-github-settings-message');
+  const shadowRoot = getSettingsPanelShadowRoot();
+  const messageEl = shadowRoot.getElementById('n8n-github-settings-message');
   if (messageEl) {
     messageEl.textContent = message;
     messageEl.className = `n8n-github-settings-message ${type}`;
