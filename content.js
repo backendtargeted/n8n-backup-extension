@@ -400,12 +400,7 @@ function createPushButton() {
     log('Pull button clicked');
     
     const instanceUrl = getInstanceUrl();
-    const workflowId = getWorkflowId();
-    
-    if (!workflowId) {
-      showNotification('Error: Could not detect workflow ID', 'error');
-      return;
-    }
+    const workflowId = getWorkflowId(); // May be null on clean system
     
     try {
       const configResponse = await sendMessageSafe({ 
@@ -424,52 +419,11 @@ function createPushButton() {
         return;
       }
       
-      // Use workflow ID directly in path pattern (don't need to fetch workflow name)
-      // The GitHub file should match the pattern with workflow-id
-      const filePath = config.githubPathPattern
-        .replace('{workflow-id}', workflowId)
-        .replace('{workflow-name}', `workflow-${workflowId}`); // Fallback if workflow-name not in pattern
-      
-      pullBtn.disabled = true;
-      pullBtn.innerHTML = 'Pulling...';
-      
-      const pullResponse = await sendMessageSafe({
-        action: 'pullWorkflowFromGitHub',
-        instanceUrl: instanceUrl,
-        filePath: filePath,
-        branch: config.defaultBranch || 'main'
-      });
-      
-      if (pullResponse && pullResponse.success) {
-        // Import workflow to n8n
-        // Use the workflow ID from the current page instead of searching by name
-        const importResponse = await sendMessageSafe({
-          action: 'importWorkflowToN8n',
-          instanceUrl: instanceUrl,
-          workflowData: pullResponse.content.content,
-          workflowName: pullResponse.content.name,
-          workflowId: workflowId // Pass the current workflow ID to update it directly
-        });
-        
-        if (importResponse && importResponse.success) {
-          const action = importResponse.action === 'updated' ? 'updated' : 'imported';
-          showNotification(`Workflow ${action} successfully!`, 'success');
-          // Reload page to show updated workflow
-          setTimeout(() => {
-            window.location.reload();
-          }, 1500);
-        } else {
-          throw new Error(importResponse?.error || 'Failed to import workflow');
-        }
-      } else {
-        throw new Error(pullResponse?.error || 'Failed to pull workflow');
-      }
+      // Show modal to select workflow from GitHub
+      await showPullWorkflowModal(instanceUrl, config, workflowId);
     } catch (error) {
-      log('Error pulling workflow:', error);
+      log('Error showing pull modal:', error);
       showNotification(`Error: ${error.message}`, 'error');
-    } finally {
-      pullBtn.disabled = false;
-      pullBtn.innerHTML = 'Pull from GitHub';
     }
   });
   
@@ -1200,6 +1154,76 @@ function injectSettingsStyles(shadowRoot) {
       }
     }
     
+    /* Modal Styles */
+    .n8n-github-modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.5);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      backdrop-filter: blur(2px);
+    }
+    
+    .n8n-github-modal {
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+      width: 90%;
+      max-width: 800px;
+      max-height: 90vh;
+      overflow-y: auto;
+      animation: slideIn 0.2s ease;
+      display: flex;
+      flex-direction: column;
+    }
+    
+    .n8n-github-modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 20px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    
+    .n8n-github-modal-header h3 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 600;
+      color: #1f2937;
+    }
+    
+    .n8n-github-modal-close {
+      background: none;
+      border: none;
+      font-size: 28px;
+      color: #6b7280;
+      cursor: pointer;
+      padding: 0;
+      width: 32px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
+      transition: background-color 0.2s ease;
+    }
+    
+    .n8n-github-modal-close:hover {
+      background: #f3f4f6;
+      color: #1f2937;
+    }
+    
+    .n8n-github-modal-body {
+      padding: 20px;
+      flex: 1;
+      overflow-y: auto;
+    }
+    
     /* Workflow List Styles */
     .n8n-workflow-list {
       display: flex;
@@ -1209,7 +1233,7 @@ function injectSettingsStyles(shadowRoot) {
     
     .n8n-workflow-item {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       gap: 12px;
       padding: 12px;
       border: 2px solid #e5e7eb;
@@ -1224,15 +1248,82 @@ function injectSettingsStyles(shadowRoot) {
       background: #f3f4f6;
     }
     
-    .n8n-workflow-item input[type="checkbox"] {
+    .n8n-workflow-item.selected {
+      border-color: #6366f1;
+      background: #eef2ff;
+    }
+    
+    .n8n-workflow-item.has-conflict {
+      border-color: #f59e0b;
+      background: #fffbeb;
+    }
+    
+    .n8n-workflow-item.has-conflict.selected {
+      border-color: #f59e0b;
+      background: #fef3c7;
+    }
+    
+    .n8n-workflow-item input[type="checkbox"],
+    .n8n-workflow-item input[type="radio"] {
       width: 20px;
       height: 20px;
+      margin-top: 2px;
       cursor: pointer;
       flex-shrink: 0;
       accent-color: #6366f1;
     }
     
+    .n8n-workflow-item-info {
+      flex: 1;
+      min-width: 0;
+    }
+    
+    .n8n-workflow-item-name {
+      font-weight: 600;
+      color: #1f2937;
+      margin-bottom: 4px;
+      font-size: 14px;
+    }
+    
+    .n8n-workflow-item-details {
+      font-size: 12px;
+      color: #6b7280;
+      margin-bottom: 8px;
+    }
+    
+    .n8n-workflow-conflict-warning {
+      font-size: 12px;
+      color: #d97706;
+      background: #fef3c7;
+      padding: 6px 10px;
+      border-radius: 4px;
+      margin-top: 8px;
+      display: inline-block;
+    }
+    
     @media (prefers-color-scheme: dark) {
+      .n8n-github-modal {
+        background: #1f2937;
+        color: #f9fafb;
+      }
+      
+      .n8n-github-modal-header {
+        border-bottom-color: #374151;
+      }
+      
+      .n8n-github-modal-header h3 {
+        color: #f9fafb;
+      }
+      
+      .n8n-github-modal-close {
+        color: #9ca3af;
+      }
+      
+      .n8n-github-modal-close:hover {
+        background: #374151;
+        color: #f9fafb;
+      }
+      
       .n8n-workflow-item {
         background: #111827;
         border-color: #374151;
@@ -1241,6 +1332,24 @@ function injectSettingsStyles(shadowRoot) {
       .n8n-workflow-item:hover {
         background: #1f2937;
         border-color: #6366f1;
+      }
+      
+      .n8n-workflow-item.selected {
+        background: #312e81;
+        border-color: #6366f1;
+      }
+      
+      .n8n-workflow-item.has-conflict {
+        background: #78350f;
+        border-color: #f59e0b;
+      }
+      
+      .n8n-workflow-item-name {
+        color: #f9fafb;
+      }
+      
+      .n8n-workflow-item-details {
+        color: #9ca3af;
       }
     }
   `;
@@ -2481,6 +2590,298 @@ function toggleSettingsPanel() {
   if (settingsVisible) {
     showInstanceListView();
   }
+}
+
+// Show pull workflow modal (for pull button on workflow page)
+async function showPullWorkflowModal(instanceUrl, config, currentWorkflowId) {
+  // Use the settings panel shadow root which already has styles injected
+  const shadowRoot = getSettingsPanelShadowRoot();
+  
+  // Inject settings styles (includes modal and workflow item styles)
+  injectSettingsStyles(shadowRoot);
+  
+  // Inject overwrite option styles if not already present (modal-specific)
+  if (!shadowRoot.getElementById('n8n-pull-overwrite-styles')) {
+    const style = document.createElement('style');
+    style.id = 'n8n-pull-overwrite-styles';
+    style.textContent = `
+      .n8n-pull-overwrite-option {
+        margin-top: 16px;
+        padding: 12px;
+        background: #fef3c7;
+        border: 1px solid #fbbf24;
+        border-radius: 6px;
+        display: none;
+      }
+      .n8n-pull-overwrite-option.show {
+        display: block;
+      }
+      .n8n-pull-overwrite-option label {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        cursor: pointer;
+        font-size: 14px;
+        color: #92400e;
+      }
+      .n8n-pull-overwrite-option input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+        accent-color: #f59e0b;
+      }
+    `;
+    shadowRoot.appendChild(style);
+  }
+  
+  const modal = document.createElement('div');
+  modal.id = 'n8n-pull-workflow-modal';
+  modal.className = 'n8n-github-modal-overlay';
+  
+  modal.innerHTML = `
+    <div class="n8n-github-modal">
+      <div class="n8n-github-modal-header">
+        <h3>Pull Workflow from GitHub</h3>
+        <button class="n8n-github-modal-close" id="n8n-pull-workflow-close">×</button>
+      </div>
+      <div class="n8n-github-modal-body">
+        <div id="n8n-pull-workflow-message" class="n8n-github-settings-message"></div>
+        <div id="n8n-pull-workflow-list" style="max-height: 400px; overflow-y: auto;">
+          <p style="text-align: center; color: #6b7280; padding: 20px;">Loading workflows...</p>
+        </div>
+        <div id="n8n-pull-workflow-overwrite-option" class="n8n-pull-overwrite-option">
+          <label>
+            <input type="checkbox" id="n8n-pull-workflow-overwrite-checkbox">
+            <span>Overwrite existing workflow (this will replace the current workflow)</span>
+          </label>
+        </div>
+        <div class="n8n-github-settings-actions" style="margin-top: 16px;">
+          <button class="n8n-github-settings-cancel" id="n8n-pull-workflow-cancel">Cancel</button>
+          <button class="n8n-github-settings-save" id="n8n-pull-workflow-pull" disabled>Pull Selected</button>
+        </div>
+      </div>
+    </div>
+  `;
+  
+  shadowRoot.appendChild(modal);
+  modal.style.display = 'flex';
+  
+  const closeBtn = shadowRoot.getElementById('n8n-pull-workflow-close');
+  const cancelBtn = shadowRoot.getElementById('n8n-pull-workflow-cancel');
+  const pullBtn = shadowRoot.getElementById('n8n-pull-workflow-pull');
+  const workflowsList = shadowRoot.getElementById('n8n-pull-workflow-list');
+  const overwriteOption = shadowRoot.getElementById('n8n-pull-workflow-overwrite-option');
+  const overwriteCheckbox = shadowRoot.getElementById('n8n-pull-workflow-overwrite-checkbox');
+  const messageEl = shadowRoot.getElementById('n8n-pull-workflow-message');
+  
+  let selectedWorkflow = null;
+  let workflowFiles = [];
+  let existingWorkflows = [];
+  
+  const closeModal = () => {
+    modal.style.display = 'none';
+    setTimeout(() => {
+      if (modal.parentNode) {
+        modal.remove();
+      }
+    }, 300);
+  };
+  
+  const showMessage = (message, type) => {
+    messageEl.textContent = message;
+    messageEl.className = `n8n-github-settings-message ${type}`;
+  };
+  
+  const loadWorkflows = async () => {
+    workflowsList.innerHTML = '<p style="text-align: center; color: #6b7280; padding: 20px;">Loading workflows...</p>';
+    
+    try {
+      // Load workflows from GitHub
+      const [owner, repo] = config.githubRepo.split('/');
+      const githubResponse = await sendMessageSafe({
+        action: 'listWorkflowFiles',
+        owner: owner,
+        repo: repo,
+        pathPattern: config.githubPathPattern || 'workflows/{workflow-name}.json',
+        branch: config.defaultBranch || 'main',
+        githubToken: config.githubToken
+      });
+      
+      if (!githubResponse || !githubResponse.success || !githubResponse.files) {
+        throw new Error(githubResponse?.error || 'Failed to load workflows from GitHub');
+      }
+      
+      workflowFiles = githubResponse.files;
+      
+      if (workflowFiles.length === 0) {
+        workflowsList.innerHTML = '<p style="text-align: center; color: #6b7280; padding: 20px;">No workflow files found in repository</p>';
+        return;
+      }
+      
+      // Load existing workflows from n8n
+      const n8nResponse = await sendMessageSafe({
+        action: 'listN8nWorkflows',
+        instanceUrl: instanceUrl
+      });
+      
+      if (n8nResponse && n8nResponse.success && n8nResponse.workflows) {
+        existingWorkflows = n8nResponse.workflows;
+      }
+      
+      // Build workflow list HTML
+      let workflowsHtml = '<div class="n8n-workflow-list">';
+      workflowFiles.forEach((file, index) => {
+        const workflowName = file.name;
+        const existingWorkflow = existingWorkflows.find(w => w.name === workflowName);
+        const hasConflict = !!existingWorkflow;
+        const isCurrentWorkflow = currentWorkflowId && existingWorkflow && existingWorkflow.id === currentWorkflowId;
+        
+        const date = new Date(file.lastModified).toLocaleDateString();
+        const conflictText = isCurrentWorkflow 
+          ? '⚠️ This will overwrite the current workflow'
+          : hasConflict 
+            ? `⚠️ Conflict: Workflow "${workflowName}" already exists`
+            : '';
+        
+        workflowsHtml += `
+          <div class="n8n-workflow-item ${hasConflict ? 'has-conflict' : ''}" data-index="${index}">
+            <input type="radio" name="workflow-select" id="workflow-${index}" data-index="${index}">
+            <div class="n8n-workflow-item-info">
+              <div class="n8n-workflow-item-name">${escapeHtml(workflowName)}</div>
+              <div class="n8n-workflow-item-details">${escapeHtml(file.path)} • ${date}</div>
+              ${conflictText ? `<div class="n8n-workflow-conflict-warning">${escapeHtml(conflictText)}</div>` : ''}
+            </div>
+          </div>
+        `;
+      });
+      workflowsHtml += '</div>';
+      
+      workflowsList.innerHTML = workflowsHtml;
+      
+      // Add click listeners
+      workflowFiles.forEach((file, index) => {
+        const item = shadowRoot.querySelector(`.n8n-workflow-item[data-index="${index}"]`);
+        const radio = shadowRoot.getElementById(`workflow-${index}`);
+        
+        if (item && radio) {
+          item.addEventListener('click', (e) => {
+            if (e.target !== radio) {
+              radio.checked = true;
+              radio.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          });
+          
+          radio.addEventListener('change', () => {
+            if (radio.checked) {
+              // Unselect others
+              shadowRoot.querySelectorAll('.n8n-workflow-item').forEach(el => {
+                el.classList.remove('selected');
+              });
+              
+              item.classList.add('selected');
+              selectedWorkflow = file;
+              
+              // Show overwrite option if there's a conflict
+              const hasConflict = !!existingWorkflows.find(w => w.name === file.name);
+              if (hasConflict) {
+                overwriteOption.classList.add('show');
+                overwriteCheckbox.checked = false;
+              } else {
+                overwriteOption.classList.remove('show');
+              }
+              
+              pullBtn.disabled = false;
+            }
+          });
+        }
+      });
+    } catch (error) {
+      log('Error loading workflows:', error);
+      workflowsList.innerHTML = `<p style="color: #ef4444; padding: 20px;">Error: ${escapeHtml(error.message)}</p>`;
+    }
+  };
+  
+  // Load workflows on open
+  await loadWorkflows();
+  
+  // Handle pull button
+  pullBtn.addEventListener('click', async () => {
+    if (!selectedWorkflow) {
+      showMessage('Please select a workflow to pull', 'error');
+      return;
+    }
+    
+    const hasConflict = !!existingWorkflows.find(w => w.name === selectedWorkflow.name);
+    const shouldOverwrite = overwriteCheckbox.checked;
+    
+    if (hasConflict && !shouldOverwrite) {
+      showMessage('Please confirm overwrite to proceed', 'error');
+      return;
+    }
+    
+    pullBtn.disabled = true;
+    pullBtn.textContent = 'Pulling...';
+    
+    try {
+      // Pull workflow from GitHub
+      const pullResponse = await sendMessageSafe({
+        action: 'pullWorkflowFromGitHub',
+        instanceUrl: instanceUrl,
+        filePath: selectedWorkflow.path,
+        branch: config.defaultBranch || 'main'
+      });
+      
+      if (!pullResponse || !pullResponse.success) {
+        throw new Error(pullResponse?.error || 'Failed to pull workflow');
+      }
+      
+      // Determine workflow ID for import
+      let targetWorkflowId = null;
+      if (hasConflict && shouldOverwrite) {
+        const existingWorkflow = existingWorkflows.find(w => w.name === selectedWorkflow.name);
+        if (existingWorkflow) {
+          targetWorkflowId = existingWorkflow.id;
+        }
+      } else if (currentWorkflowId && !hasConflict) {
+        // If we're on a workflow page and no conflict, update current workflow
+        targetWorkflowId = currentWorkflowId;
+      }
+      
+      // Import workflow to n8n
+      const importResponse = await sendMessageSafe({
+        action: 'importWorkflowToN8n',
+        instanceUrl: instanceUrl,
+        workflowData: pullResponse.content.content,
+        workflowName: pullResponse.content.name,
+        workflowId: targetWorkflowId
+      });
+      
+      if (importResponse && importResponse.success) {
+        const action = importResponse.action === 'updated' ? 'updated' : 'imported';
+        showMessage(`Workflow ${action} successfully!`, 'success');
+        setTimeout(() => {
+          closeModal();
+          window.location.reload();
+        }, 1500);
+      } else {
+        throw new Error(importResponse?.error || 'Failed to import workflow');
+      }
+    } catch (error) {
+      log('Error pulling workflow:', error);
+      showMessage(`Error: ${escapeHtml(error.message)}`, 'error');
+      pullBtn.disabled = false;
+      pullBtn.textContent = 'Pull Selected';
+    }
+  });
+  
+  if (closeBtn) closeBtn.addEventListener('click', closeModal);
+  if (cancelBtn) cancelBtn.addEventListener('click', closeModal);
+  
+  // Close on overlay click
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) {
+      closeModal();
+    }
+  });
 }
 
 // Show pull workflows modal
