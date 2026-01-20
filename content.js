@@ -1238,7 +1238,7 @@ function injectSettingsStyles(shadowRoot) {
     
     .n8n-workflow-item {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       gap: 12px;
       padding: 12px;
       border: 2px solid #e5e7eb;
@@ -1253,15 +1253,82 @@ function injectSettingsStyles(shadowRoot) {
       background: #f3f4f6;
     }
     
-    .n8n-workflow-item input[type="checkbox"] {
+    .n8n-workflow-item.selected {
+      border-color: #6366f1;
+      background: #eef2ff;
+    }
+    
+    .n8n-workflow-item.has-conflict {
+      border-color: #f59e0b;
+      background: #fffbeb;
+    }
+    
+    .n8n-workflow-item.has-conflict.selected {
+      border-color: #f59e0b;
+      background: #fef3c7;
+    }
+    
+    .n8n-workflow-item input[type="checkbox"],
+    .n8n-workflow-item input[type="radio"] {
       width: 20px;
       height: 20px;
+      margin-top: 2px;
       cursor: pointer;
       flex-shrink: 0;
       accent-color: #6366f1;
     }
     
+    .n8n-workflow-item-info {
+      flex: 1;
+      min-width: 0;
+    }
+    
+    .n8n-workflow-item-name {
+      font-weight: 600;
+      color: #1f2937;
+      margin-bottom: 4px;
+      font-size: 14px;
+    }
+    
+    .n8n-workflow-item-details {
+      font-size: 12px;
+      color: #6b7280;
+      margin-bottom: 8px;
+    }
+    
+    .n8n-workflow-conflict-warning {
+      font-size: 12px;
+      color: #d97706;
+      background: #fef3c7;
+      padding: 6px 10px;
+      border-radius: 4px;
+      margin-top: 8px;
+      display: inline-block;
+    }
+    
     @media (prefers-color-scheme: dark) {
+      .n8n-github-modal {
+        background: #1f2937;
+        color: #f9fafb;
+      }
+      
+      .n8n-github-modal-header {
+        border-bottom-color: #374151;
+      }
+      
+      .n8n-github-modal-header h3 {
+        color: #f9fafb;
+      }
+      
+      .n8n-github-modal-close {
+        color: #9ca3af;
+      }
+      
+      .n8n-github-modal-close:hover {
+        background: #374151;
+        color: #f9fafb;
+      }
+      
       .n8n-workflow-item {
         background: #111827;
         border-color: #374151;
@@ -1270,6 +1337,24 @@ function injectSettingsStyles(shadowRoot) {
       .n8n-workflow-item:hover {
         background: #1f2937;
         border-color: #6366f1;
+      }
+      
+      .n8n-workflow-item.selected {
+        background: #312e81;
+        border-color: #6366f1;
+      }
+      
+      .n8n-workflow-item.has-conflict {
+        background: #78350f;
+        border-color: #f59e0b;
+      }
+      
+      .n8n-workflow-item-name {
+        color: #f9fafb;
+      }
+      
+      .n8n-workflow-item-details {
+        color: #9ca3af;
       }
     }
   `;
