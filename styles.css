@@ -1,0 +1,319 @@
+/* Styles for n8n GitHub Backup Extension */
+
+/* Push to GitHub Button */
+.n8n-github-sync-btn {
+  background: #ff6d5a;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 12px;
+  cursor: pointer;
+  margin-right: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  transition: background-color 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.n8n-github-sync-btn:hover {
+  background: #ff5a45;
+}
+
+.n8n-github-sync-btn:active {
+  background: #ff4a35;
+}
+
+.n8n-github-sync-btn:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+/* Settings Button */
+.n8n-github-settings-btn {
+  background: #6366f1;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 12px;
+  cursor: pointer;
+  margin-right: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  transition: background-color 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.n8n-github-settings-btn:hover {
+  background: #4f46e5;
+}
+
+.n8n-github-settings-btn:active {
+  background: #4338ca;
+}
+
+/* Settings Panel */
+.n8n-github-settings-panel {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  backdrop-filter: blur(2px);
+}
+
+.n8n-github-settings-content {
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+  width: 90%;
+  max-width: 600px;
+  max-height: 90vh;
+  overflow-y: auto;
+  animation: slideIn 0.2s ease;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.n8n-github-settings-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.n8n-github-settings-header h3 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.n8n-github-settings-close {
+  background: none;
+  border: none;
+  font-size: 28px;
+  color: #6b7280;
+  cursor: pointer;
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: background-color 0.2s ease;
+}
+
+.n8n-github-settings-close:hover {
+  background: #f3f4f6;
+  color: #1f2937;
+}
+
+.n8n-github-settings-body {
+  padding: 20px;
+}
+
+.n8n-github-settings-field {
+  margin-bottom: 20px;
+}
+
+.n8n-github-settings-field label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 500;
+  color: #374151;
+  font-size: 14px;
+}
+
+.n8n-github-settings-field input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 14px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  box-sizing: border-box;
+}
+
+.n8n-github-settings-field input:focus {
+  outline: none;
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+
+.n8n-github-settings-field small {
+  display: block;
+  margin-top: 4px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.n8n-github-settings-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.n8n-github-settings-save,
+.n8n-github-settings-cancel {
+  flex: 1;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.n8n-github-settings-save {
+  background: #6366f1;
+  color: white;
+}
+
+.n8n-github-settings-save:hover {
+  background: #4f46e5;
+}
+
+.n8n-github-settings-save:active {
+  background: #4338ca;
+}
+
+.n8n-github-settings-cancel {
+  background: #f3f4f6;
+  color: #374151;
+}
+
+.n8n-github-settings-cancel:hover {
+  background: #e5e7eb;
+}
+
+.n8n-github-settings-message {
+  margin-top: 16px;
+  padding: 12px;
+  border-radius: 6px;
+  font-size: 14px;
+  display: none;
+}
+
+.n8n-github-settings-message.success {
+  background: #d1fae5;
+  color: #065f46;
+  border: 1px solid #6ee7b7;
+}
+
+.n8n-github-settings-message.error {
+  background: #fee2e2;
+  color: #991b1b;
+  border: 1px solid #fca5a5;
+}
+
+/* Notification Toast */
+.n8n-github-notification {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  padding: 12px 20px;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 10001;
+  font-size: 14px;
+  font-weight: 500;
+  opacity: 0;
+  transform: translateX(100%);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+  max-width: 400px;
+}
+
+.n8n-github-notification.show {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.n8n-github-notification-success {
+  background: #10b981;
+  color: white;
+}
+
+.n8n-github-notification-error {
+  background: #ef4444;
+  color: white;
+}
+
+.n8n-github-notification-info {
+  background: #3b82f6;
+  color: white;
+}
+
+/* Dark mode support (if n8n uses dark mode) */
+@media (prefers-color-scheme: dark) {
+  .n8n-github-settings-content {
+    background: #1f2937;
+    color: #f9fafb;
+  }
+  
+  .n8n-github-settings-header {
+    border-bottom-color: #374151;
+  }
+  
+  .n8n-github-settings-header h3 {
+    color: #f9fafb;
+  }
+  
+  .n8n-github-settings-close {
+    color: #9ca3af;
+  }
+  
+  .n8n-github-settings-close:hover {
+    background: #374151;
+    color: #f9fafb;
+  }
+  
+  .n8n-github-settings-field label {
+    color: #e5e7eb;
+  }
+  
+  .n8n-github-settings-field input {
+    background: #111827;
+    border-color: #374151;
+    color: #f9fafb;
+  }
+  
+  .n8n-github-settings-field input:focus {
+    border-color: #6366f1;
+  }
+  
+  .n8n-github-settings-field small {
+    color: #9ca3af;
+  }
+  
+  .n8n-github-settings-cancel {
+    background: #374151;
+    color: #e5e7eb;
+  }
+  
+  .n8n-github-settings-cancel:hover {
+    background: #4b5563;
+  }
+}
+

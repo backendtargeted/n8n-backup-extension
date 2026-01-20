@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "n8n Version Control",
+  "version": "1.0.0",
+  "description": "Push n8n workflows to GitHub with one click",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://api.github.com/*",
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "n8n Version Control",
+    "default_popup": "popup.html"
+  }
+}
+

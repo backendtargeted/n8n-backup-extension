@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body {
+      width: 500px;
+      padding: 20px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      margin: 0;
+    }
+    h2 {
+      margin-top: 0;
+      color: #333;
+    }
+    .field {
+      margin-bottom: 20px;
+    }
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-weight: 500;
+      color: #374151;
+      font-size: 14px;
+    }
+    input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-size: 14px;
+      box-sizing: border-box;
+    }
+    input:focus {
+      outline: none;
+      border-color: #6366f1;
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+    }
+    small {
+      display: block;
+      margin-top: 4px;
+      color: #6b7280;
+      font-size: 12px;
+    }
+    .actions {
+      display: flex;
+      gap: 12px;
+      margin-top: 24px;
+    }
+    button {
+      flex: 1;
+      padding: 10px 16px;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background-color 0.2s ease;
+    }
+    .save {
+      background: #6366f1;
+      color: white;
+    }
+    .save:hover {
+      background: #4f46e5;
+    }
+    .test {
+      background: #10b981;
+      color: white;
+    }
+    .test:hover {
+      background: #059669;
+    }
+    .message {
+      margin-top: 16px;
+      padding: 12px;
+      border-radius: 6px;
+      font-size: 14px;
+      display: none;
+    }
+    .message.success {
+      background: #d1fae5;
+      color: #065f46;
+      border: 1px solid #6ee7b7;
+    }
+    .message.error {
+      background: #fee2e2;
+      color: #991b1b;
+      border: 1px solid #fca5a5;
+    }
+  </style>
+</head>
+<body>
+  <h2>n8n GitHub Backup Settings</h2>
+  
+  <div class="field">
+    <label for="n8n-url">n8n Instance URL *</label>
+    <input type="text" id="n8n-url" placeholder="https://n8n.example.com or http://localhost:5678" />
+    <small>Base URL of your n8n instance</small>
+  </div>
+  
+  <div class="field">
+    <label for="n8n-api-key">n8n API Key *</label>
+    <input type="password" id="n8n-api-key" placeholder="Your n8n API key" />
+    <small>Found in n8n Settings > API</small>
+  </div>
+  
+  <div class="field">
+    <label for="github-repo">GitHub Repository *</label>
+    <input type="text" id="github-repo" placeholder="owner/repo" />
+    <small>Format: owner/repository-name</small>
+  </div>
+  
+  <div class="field">
+    <label for="github-token">GitHub Personal Access Token *</label>
+    <input type="password" id="github-token" placeholder="ghp_xxxxxxxxxxxx" />
+    <small>Token with 'repo' scope. Create at: github.com/settings/tokens</small>
+  </div>
+  
+  <div class="field">
+    <label for="github-path-pattern">GitHub Path Pattern</label>
+    <input type="text" id="github-path-pattern" placeholder="workflows/{workflow-name}.json" />
+    <small>Use {workflow-name} and {workflow-id} as placeholders</small>
+  </div>
+  
+  <div class="actions">
+    <button id="save-btn" class="save">Save</button>
+    <button id="test-btn" class="test">Test Connection</button>
+  </div>
+  
+  <div id="message" class="message"></div>
+  
+  <script src="popup.js"></script>
+</body>
+</html>
+
