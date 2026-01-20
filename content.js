@@ -64,8 +64,9 @@ async function sendMessageSafe(request) {
     return await chrome.runtime.sendMessage(request);
   } catch (error) {
     // Check for extension context invalidation
+    const lastError = chrome.runtime.lastError;
     const isInvalidated = error.message?.includes('Extension context invalidated') || 
-                         chrome.runtime.lastError?.message?.includes('Extension context invalidated') ||
+                         (lastError && lastError.message?.includes('Extension context invalidated')) ||
                          error.message?.includes('message port closed');
     
     if (isInvalidated) {
@@ -400,12 +401,7 @@ function createPushButton() {
     log('Pull button clicked');
     
     const instanceUrl = getInstanceUrl();
-    const workflowId = getWorkflowId();
-    
-    if (!workflowId) {
-      showNotification('Error: Could not detect workflow ID', 'error');
-      return;
-    }
+    const workflowId = getWorkflowId(); // May be null on clean system
     
     try {
       const configResponse = await sendMessageSafe({ 
@@ -424,52 +420,11 @@ function createPushButton() {
         return;
       }
       
-      // Use workflow ID directly in path pattern (don't need to fetch workflow name)
-      // The GitHub file should match the pattern with workflow-id
-      const filePath = config.githubPathPattern
-        .replace('{workflow-id}', workflowId)
-        .replace('{workflow-name}', `workflow-${workflowId}`); // Fallback if workflow-name not in pattern
-      
-      pullBtn.disabled = true;
-      pullBtn.innerHTML = 'Pulling...';
-      
-      const pullResponse = await sendMessageSafe({
-        action: 'pullWorkflowFromGitHub',
-        instanceUrl: instanceUrl,
-        filePath: filePath,
-        branch: config.defaultBranch || 'main'
-      });
-      
-      if (pullResponse && pullResponse.success) {
-        // Import workflow to n8n
-        // Use the workflow ID from the current page instead of searching by name
-        const importResponse = await sendMessageSafe({
-          action: 'importWorkflowToN8n',
-          instanceUrl: instanceUrl,
-          workflowData: pullResponse.content.content,
-          workflowName: pullResponse.content.name,
-          workflowId: workflowId // Pass the current workflow ID to update it directly
-        });
-        
-        if (importResponse && importResponse.success) {
-          const action = importResponse.action === 'updated' ? 'updated' : 'imported';
-          showNotification(`Workflow ${action} successfully!`, 'success');
-          // Reload page to show updated workflow
-          setTimeout(() => {
-            window.location.reload();
-          }, 1500);
-        } else {
-          throw new Error(importResponse?.error || 'Failed to import workflow');
-        }
-      } else {
-        throw new Error(pullResponse?.error || 'Failed to pull workflow');
-      }
+      // Show modal to select workflow from GitHub
+      await showPullWorkflowModal(instanceUrl, config, workflowId);
     } catch (error) {
-      log('Error pulling workflow:', error);
+      log('Error showing pull modal:', error);
       showNotification(`Error: ${error.message}`, 'error');
-    } finally {
-      pullBtn.disabled = false;
-      pullBtn.innerHTML = 'Pull from GitHub';
     }
   });
   
@@ -2559,8 +2514,10 @@ function toggleSettingsPanel() {
 
 // Show pull workflow modal (for pull button on workflow page)
 async function showPullWorkflowModal(instanceUrl, config, currentWorkflowId) {
-  // Use the settings panel shadow root which already has styles injected
-  const shadowRoot = getSettingsPanelShadowRoot();
+  // Step 5: Error boundary - wrap modal setup
+  try {
+    // Use the settings panel shadow root which already has styles injected
+    const shadowRoot = getSettingsPanelShadowRoot();
   
   // Inject settings styles (includes modal and workflow item styles)
   injectSettingsStyles(shadowRoot);
@@ -2633,7 +2590,7 @@ async function showPullWorkflowModal(instanceUrl, config, currentWorkflowId) {
   // Prevent scroll/wheel events from propagating to the underlying canvas
   modal.addEventListener('wheel', (e) => {
     e.stopPropagation();
-  }, { passive: false });
+  }, { passive: true });
   
   modal.addEventListener('scroll', (e) => {
     e.stopPropagation();
@@ -2646,6 +2603,31 @@ async function showPullWorkflowModal(instanceUrl, config, currentWorkflowId) {
   const overwriteOption = shadowRoot.getElementById('n8n-pull-workflow-overwrite-option');
   const overwriteCheckbox = shadowRoot.getElementById('n8n-pull-workflow-overwrite-checkbox');
   const messageEl = shadowRoot.getElementById('n8n-pull-workflow-message');
+  
+  // Step 1: Element validation and debugging
+  console.log('[n8n-ext] Element validation:', {
+    closeBtn: !!closeBtn,
+    cancelBtn: !!cancelBtn,
+    pullBtn: !!pullBtn,
+    workflowsList: !!workflowsList,
+    overwriteOption: !!overwriteOption,
+    overwriteCheckbox: !!overwriteCheckbox,
+    messageEl: !!messageEl,
+    pullBtnDisabled: pullBtn?.disabled
+  });
+  
+  if (!pullBtn) {
+    console.error('[n8n-ext] CRITICAL: Pull button not found!');
+    if (messageEl) {
+      messageEl.textContent = 'Error: Pull button not found';
+      messageEl.className = 'n8n-github-settings-message error';
+    }
+    return;
+  }
+  
+  if (!closeBtn || !cancelBtn || !workflowsList || !overwriteOption || !overwriteCheckbox || !messageEl) {
+    console.error('[n8n-ext] CRITICAL: One or more modal elements not found!');
+  }
   
   let selectedWorkflow = null;
   let workflowFiles = [];
@@ -2671,6 +2653,14 @@ async function showPullWorkflowModal(instanceUrl, config, currentWorkflowId) {
     try {
       // Load workflows from GitHub
       const [owner, repo] = config.githubRepo.split('/');
+      
+      console.log('[n8n-ext] Loading workflows from GitHub:', {
+        owner,
+        repo,
+        pathPattern: config.githubPathPattern || 'workflows/{workflow-name}.json',
+        branch: config.defaultBranch || 'main'
+      });
+      
       const githubResponse = await sendMessageSafe({
         action: 'listWorkflowFiles',
         owner: owner,
@@ -2680,25 +2670,54 @@ async function showPullWorkflowModal(instanceUrl, config, currentWorkflowId) {
         githubToken: config.githubToken
       });
       
-      if (!githubResponse || !githubResponse.success || !githubResponse.files) {
-        throw new Error(githubResponse?.error || 'Failed to load workflows from GitHub');
+      console.log('[n8n-ext] GitHub response received:', {
+        success: githubResponse?.success,
+        hasFiles: !!githubResponse?.files,
+        filesCount: githubResponse?.files?.length || 0,
+        error: githubResponse?.error
+      });
+      
+      if (!githubResponse || !githubResponse.success) {
+        const errorMsg = githubResponse?.error || 'Failed to load workflows from GitHub';
+        console.error('[n8n-ext] GitHub response error:', errorMsg);
+        workflowsList.innerHTML = `<p style="color: #ef4444; padding: 20px;">Error: ${escapeHtml(errorMsg)}</p>`;
+        return;
+      }
+      
+      if (!githubResponse.files) {
+        console.error('[n8n-ext] GitHub response missing files array');
+        workflowsList.innerHTML = '<p style="color: #ef4444; padding: 20px;">Error: Invalid response from GitHub</p>';
+        return;
       }
       
       workflowFiles = githubResponse.files;
       
+      console.log('[n8n-ext] Workflow files loaded:', workflowFiles.length);
+      
       if (workflowFiles.length === 0) {
-        workflowsList.innerHTML = '<p style="text-align: center; color: #6b7280; padding: 20px;">No workflow files found in repository</p>';
+        console.warn('[n8n-ext] No workflow files found. Check path pattern:', config.githubPathPattern || 'workflows/{workflow-name}.json');
+        workflowsList.innerHTML = '<p style="text-align: center; color: #6b7280; padding: 20px;">No workflow files found in repository. Check your path pattern configuration.</p>';
         return;
       }
       
       // Load existing workflows from n8n
-      const n8nResponse = await sendMessageSafe({
-        action: 'listN8nWorkflows',
-        instanceUrl: instanceUrl
-      });
-      
-      if (n8nResponse && n8nResponse.success && n8nResponse.workflows) {
-        existingWorkflows = n8nResponse.workflows;
+      try {
+        const n8nResponse = await sendMessageSafe({
+          action: 'listN8nWorkflows',
+          instanceUrl: instanceUrl
+        });
+        
+        if (n8nResponse && n8nResponse.success && n8nResponse.workflows) {
+          existingWorkflows = n8nResponse.workflows;
+        } else if (n8nResponse && !n8nResponse.success) {
+          // Log error but continue - we can still show workflows from GitHub
+          log('Warning: Could not load existing workflows:', n8nResponse.error);
+          existingWorkflows = [];
+        }
+      } catch (error) {
+        // If listing fails, continue without conflict detection
+        log('Warning: Could not load existing workflows:', error);
+        existingWorkflows = [];
       }
       
       // Build workflow list HTML
@@ -2709,7 +2728,19 @@ async function showPullWorkflowModal(instanceUrl, config, currentWorkflowId) {
         const hasConflict = !!existingWorkflow;
         const isCurrentWorkflow = currentWorkflowId && existingWorkflow && existingWorkflow.id === currentWorkflowId;
         
-        const date = new Date(file.lastModified).toLocaleDateString();
+        // Handle date display - GitHub API might not always return dates
+        let dateStr = '';
+        if (file.lastModified) {
+          try {
+            const date = new Date(file.lastModified);
+            if (!isNaN(date.getTime())) {
+              dateStr = ' • ' + date.toLocaleDateString();
+            }
+          } catch (e) {
+            // Invalid date, skip it
+          }
+        }
+        
         const conflictText = isCurrentWorkflow 
           ? '⚠️ This will overwrite the current workflow'
           : hasConflict 
@@ -2721,7 +2752,7 @@ async function showPullWorkflowModal(instanceUrl, config, currentWorkflowId) {
             <input type="radio" name="workflow-select" id="workflow-${index}" data-index="${index}">
             <div class="n8n-workflow-item-info">
               <div class="n8n-workflow-item-name">${escapeHtml(workflowName)}</div>
-              <div class="n8n-workflow-item-details">${escapeHtml(file.path)} • ${date}</div>
+              <div class="n8n-workflow-item-details">${escapeHtml(file.path)}${dateStr}</div>
               ${conflictText ? `<div class="n8n-workflow-conflict-warning">${escapeHtml(conflictText)}</div>` : ''}
             </div>
           </div>
@@ -2736,31 +2767,47 @@ async function showPullWorkflowModal(instanceUrl, config, currentWorkflowId) {
         const item = shadowRoot.querySelector(`.n8n-workflow-item[data-index="${index}"]`);
         const radio = shadowRoot.getElementById(`workflow-${index}`);
         
-        if (item && radio) {
+        if (item && radio && file && file.path) {
           // Handle clicks on the item
           item.addEventListener('click', (e) => {
             e.stopPropagation();
-            // If clicking on the radio itself, let it handle naturally
-            if (e.target === radio) {
+            
+            // If clicking directly on the radio, let browser handle it naturally
+            if (e.target === radio || e.target.tagName === 'INPUT') {
               return;
             }
+            
             // Otherwise, programmatically check the radio
+            log('Item clicked, checking radio:', index, file.name, file.path);
             radio.checked = true;
-            radio.dispatchEvent(new Event('change', { bubbles: true }));
+            // Trigger change event to update selection
+            const changeEvent = new Event('change', { bubbles: true, cancelable: true });
+            radio.dispatchEvent(changeEvent);
           });
           
           // Handle radio button changes (fires when radio is checked)
           radio.addEventListener('change', (e) => {
             e.stopPropagation();
             if (radio.checked) {
+              log('Radio selected:', index, file.name, file.path);
+              
               // Unselect all items visually
               shadowRoot.querySelectorAll('.n8n-workflow-item').forEach(el => {
                 el.classList.remove('selected');
               });
               
+              // Uncheck all other radios
+              shadowRoot.querySelectorAll('input[name="workflow-select"]').forEach(r => {
+                if (r !== radio) {
+                  r.checked = false;
+                }
+              });
+              
               // Select this item
               item.classList.add('selected');
               selectedWorkflow = file;
+              
+              log('Selected workflow set:', selectedWorkflow?.name, selectedWorkflow?.path);
               
               // Show overwrite option if there's a conflict
               const hasConflict = !!existingWorkflows.find(w => w.name === file.name);
@@ -2772,12 +2819,22 @@ async function showPullWorkflowModal(instanceUrl, config, currentWorkflowId) {
               }
               
               pullBtn.disabled = false;
+              
+              // Step 3: Selection state debugging
+              console.log('[n8n-ext] Button enabled, selectedWorkflow:', selectedWorkflow);
+              console.log('[n8n-ext] Button disabled state:', pullBtn.disabled);
+              console.log('[n8n-ext] Selected workflow details:', {
+                name: selectedWorkflow?.name,
+                path: selectedWorkflow?.path,
+                hasPath: !!selectedWorkflow?.path
+              });
             }
           });
           
-          // Prevent clicks on radio from bubbling
+          // Handle direct clicks on radio button
           radio.addEventListener('click', (e) => {
             e.stopPropagation();
+            // The change event will handle the selection
           });
         }
       });
@@ -2790,10 +2847,40 @@ async function showPullWorkflowModal(instanceUrl, config, currentWorkflowId) {
   // Load workflows on open
   await loadWorkflows();
   
+  // Step 2: Click event debugging - attach listener
+  console.log('[n8n-ext] Attaching pull button listener, button disabled:', pullBtn.disabled);
+  console.log('[n8n-ext] Pull button element:', pullBtn);
+  
   // Handle pull button
-  pullBtn.addEventListener('click', async () => {
+  pullBtn.addEventListener('click', async (e) => {
+    // Step 2 & 6: Click event debugging and button state verification
+    console.log('[n8n-ext] Pull button clicked!', e);
+    console.log('[n8n-ext] Button state on click:', {
+      disabled: pullBtn.disabled,
+      selectedWorkflow: selectedWorkflow,
+      hasSelectedWorkflow: !!selectedWorkflow,
+      selectedWorkflowPath: selectedWorkflow?.path
+    });
+    
+    e.stopPropagation();
+    
+    // Step 6: Verify button state on click
+    if (pullBtn.disabled) {
+      console.error('[n8n-ext] ERROR: Button is disabled but click event fired!');
+      showMessage('Button is disabled. Please select a workflow first.', 'error');
+      return;
+    }
+    
+    log('Pull button clicked, selectedWorkflow:', selectedWorkflow);
+    
     if (!selectedWorkflow) {
       showMessage('Please select a workflow to pull', 'error');
+      return;
+    }
+    
+    if (!selectedWorkflow.path) {
+      showMessage('Selected workflow is missing file path', 'error');
+      log('Invalid selectedWorkflow:', selectedWorkflow);
       return;
     }
     
@@ -2809,16 +2896,69 @@ async function showPullWorkflowModal(instanceUrl, config, currentWorkflowId) {
     pullBtn.textContent = 'Pulling...';
     
     try {
-      // Pull workflow from GitHub
-      const pullResponse = await sendMessageSafe({
-        action: 'pullWorkflowFromGitHub',
-        instanceUrl: instanceUrl,
+      log('Pulling workflow from GitHub:', selectedWorkflow.path);
+      
+      // Step 4: Network request debugging - pull from GitHub
+      console.log('[n8n-ext] About to send pullWorkflowFromGitHub message:', {
         filePath: selectedWorkflow.path,
-        branch: config.defaultBranch || 'main'
+        branch: config.defaultBranch || 'main',
+        instanceUrl: instanceUrl
       });
+      
+      let pullResponse;
+      try {
+        pullResponse = await sendMessageSafe({
+          action: 'pullWorkflowFromGitHub',
+          instanceUrl: instanceUrl,
+          filePath: selectedWorkflow.path,
+          branch: config.defaultBranch || 'main'
+        });
+        console.log('[n8n-ext] Pull response received:', {
+          success: pullResponse?.success,
+          hasContent: !!pullResponse?.content,
+          workflowName: pullResponse?.name,
+          hasNodes: !!pullResponse?.content?.nodes,
+          hasConnections: !!pullResponse?.content?.connections,
+          error: pullResponse?.error
+        });
+      } catch (error) {
+        console.error('[n8n-ext] Error sending pullWorkflowFromGitHub message:', error);
+        throw error;
+      }
       
       if (!pullResponse || !pullResponse.success) {
         throw new Error(pullResponse?.error || 'Failed to pull workflow');
+      }
+      
+      // Step 7: Verify workflow data structure
+      // Note: pullResponse.content IS the workflow object (not pullResponse.content.content)
+      console.log('[n8n-ext] Pull response structure:', {
+        hasContent: !!pullResponse.content,
+        workflowKeys: pullResponse.content ? Object.keys(pullResponse.content) : [],
+        workflowName: pullResponse.name,
+        contentType: typeof pullResponse.content,
+        hasNodes: !!pullResponse.content?.nodes,
+        nodesType: typeof pullResponse.content?.nodes,
+        nodesIsArray: Array.isArray(pullResponse.content?.nodes),
+        nodesCount: pullResponse.content?.nodes?.length || 0,
+        hasConnections: !!pullResponse.content?.connections,
+        // Log first 500 chars of workflow data for debugging
+        workflowDataSample: pullResponse.content ? JSON.stringify(pullResponse.content).substring(0, 500) : 'null'
+      });
+      
+      // Validate workflow structure before proceeding
+      if (!pullResponse.content || typeof pullResponse.content !== 'object') {
+        throw new Error('Invalid workflow data: content is not an object');
+      }
+      
+      if (!pullResponse.content.nodes || !Array.isArray(pullResponse.content.nodes)) {
+        console.error('[n8n-ext] Workflow data validation failed:', {
+          hasNodes: !!pullResponse.content.nodes,
+          nodesType: typeof pullResponse.content.nodes,
+          nodesIsArray: Array.isArray(pullResponse.content.nodes),
+          allKeys: Object.keys(pullResponse.content)
+        });
+        throw new Error('Invalid workflow data: missing required "nodes" array. The workflow file may be corrupted or in an unsupported format.');
       }
       
       // Determine workflow ID for import
@@ -2833,14 +2973,36 @@ async function showPullWorkflowModal(instanceUrl, config, currentWorkflowId) {
         targetWorkflowId = currentWorkflowId;
       }
       
-      // Import workflow to n8n
-      const importResponse = await sendMessageSafe({
-        action: 'importWorkflowToN8n',
-        instanceUrl: instanceUrl,
-        workflowData: pullResponse.content.content,
-        workflowName: pullResponse.content.name,
-        workflowId: targetWorkflowId
+      // Step 4: Network request debugging - import to n8n
+      // Fix: pullResponse.content IS the workflow object, not pullResponse.content.content
+      console.log('[n8n-ext] About to send importWorkflowToN8n message:', {
+        workflowName: pullResponse.name,
+        workflowId: targetWorkflowId,
+        hasWorkflowData: !!pullResponse.content,
+        workflowDataKeys: pullResponse.content ? Object.keys(pullResponse.content) : [],
+        hasNodes: !!pullResponse.content?.nodes,
+        hasConnections: !!pullResponse.content?.connections
       });
+      
+      let importResponse;
+      try {
+        importResponse = await sendMessageSafe({
+          action: 'importWorkflowToN8n',
+          instanceUrl: instanceUrl,
+          workflowData: pullResponse.content, // Fix: use pullResponse.content directly
+          workflowName: pullResponse.name,
+          workflowId: targetWorkflowId
+        });
+        console.log('[n8n-ext] Import response received:', {
+          success: importResponse?.success,
+          action: importResponse?.action,
+          workflowId: importResponse?.workflowId,
+          error: importResponse?.error
+        });
+      } catch (error) {
+        console.error('[n8n-ext] Error sending importWorkflowToN8n message:', error);
+        throw error;
+      }
       
       if (importResponse && importResponse.success) {
         const action = importResponse.action === 'updated' ? 'updated' : 'imported';
@@ -2887,6 +3049,17 @@ async function showPullWorkflowModal(instanceUrl, config, currentWorkflowId) {
     modalContent.addEventListener('click', (e) => {
       e.stopPropagation();
     });
+  }
+  } catch (error) {
+    // Step 5: Error boundary - catch initialization errors
+    console.error('[n8n-ext] CRITICAL: Error during modal initialization:', error);
+    const shadowRoot = getSettingsPanelShadowRoot();
+    const messageEl = shadowRoot?.getElementById('n8n-pull-workflow-message');
+    if (messageEl) {
+      messageEl.textContent = `Error initializing modal: ${error.message}`;
+      messageEl.className = 'n8n-github-settings-message error';
+    }
+    showNotification(`Error: ${error.message}`, 'error');
   }
 }
 
@@ -3093,11 +3266,12 @@ async function showPullWorkflowsModal(shadowRoot, instances, currentInstanceUrl)
           
           if (pullResponse && pullResponse.success) {
             // Import to n8n
+            // Fix: pullResponse.content IS the workflow object, not pullResponse.content.content
             const importResponse = await sendMessageSafe({
               action: 'importWorkflowToN8n',
               instanceUrl: currentInstance.n8nUrl,
-              workflowData: pullResponse.content.content,
-              workflowName: pullResponse.content.name
+              workflowData: pullResponse.content, // Fix: use pullResponse.content directly
+              workflowName: pullResponse.name
             });
             
             if (importResponse && importResponse.success) {

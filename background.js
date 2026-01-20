@@ -649,8 +649,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
   
   if (request.action === 'importWorkflowToN8n') {
-    importWorkflowToN8n(request.instanceUrl, request.workflowData, request.workflowName)
+    importWorkflowToN8n(request.instanceUrl, request.workflowData, request.workflowName, request.workflowId)
       .then(result => sendResponse({ success: true, ...result }))
+      .catch(error => sendResponse({ success: false, error: sanitizeError(error, DEBUG) }));
+    return true;
+  }
+  
+  if (request.action === 'listN8nWorkflows') {
+    listN8nWorkflows(request.instanceUrl)
+      .then(workflows => sendResponse({ success: true, workflows }))
       .catch(error => sendResponse({ success: false, error: sanitizeError(error, DEBUG) }));
     return true;
   }
@@ -1328,31 +1335,120 @@ async function listWorkflowFiles(owner, repo, pathPattern, branch, githubToken) 
   const basePath = pathPattern.split('{')[0].replace(/\/$/, '') || '';
   const searchPath = basePath || '';
   
-  const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${searchPath}?ref=${branch || 'main'}`, {
+  console.log('[n8n-ext] listWorkflowFiles called:', {
+    owner,
+    repo,
+    pathPattern,
+    basePath,
+    searchPath,
+    branch: branch || 'main'
+  });
+  
+  const url = `https://api.github.com/repos/${owner}/${repo}/contents/${searchPath}?ref=${branch || 'main'}`;
+  console.log('[n8n-ext] Fetching GitHub contents from:', url);
+  
+  const response = await fetch(url, {
     headers: {
       'Authorization': `token ${githubToken}`,
       'Accept': 'application/vnd.github.v3+json'
     }
   });
   
+  console.log('[n8n-ext] GitHub API response status:', response.status, response.statusText);
+  
   if (!response.ok) {
     // If path doesn't exist, return empty array
     if (response.status === 404) {
+      console.log('[n8n-ext] Path not found (404), returning empty array');
       return [];
     }
     const errorText = await response.text();
+    console.error('[n8n-ext] GitHub API error:', response.status, errorText);
     throw new Error(`Failed to list files: ${response.status} ${errorText}`);
   }
   
   const contents = await response.json();
+  console.log('[n8n-ext] GitHub contents received:', {
+    isArray: Array.isArray(contents),
+    length: Array.isArray(contents) ? contents.length : 'N/A',
+    type: typeof contents,
+    sample: Array.isArray(contents) ? contents.slice(0, 3).map(item => ({ name: item.name, type: item.type })) : contents
+  });
+  
+  // Handle case where GitHub returns a single file instead of array
+  if (!Array.isArray(contents)) {
+    console.log('[n8n-ext] GitHub returned single item, not array');
+    if (contents.type === 'file' && contents.name.endsWith('.json')) {
+      try {
+        // Use the content field directly from GitHub API response (it's base64 encoded)
+        if (!contents.content) {
+          console.error('[n8n-ext] Single file has no content field');
+          return [];
+        }
+        
+        // Decode base64 content
+        const fileContent = JSON.parse(atob(contents.content.replace(/\s/g, '')));
+        
+        return [{
+          name: fileContent.name || contents.name.replace('.json', ''),
+          path: contents.path,
+          sha: contents.sha,
+          size: contents.size,
+          lastModified: contents.updated_at || contents.created_at,
+          content: fileContent
+        }];
+      } catch (e) {
+        console.error('[n8n-ext] Error processing single file:', contents.name, e.message || e);
+        return [];
+      }
+    }
+    return [];
+  }
+  
   const workflowFiles = [];
   
   // Filter for JSON files and recursively search if needed
   for (const item of contents) {
     if (item.type === 'file' && item.name.endsWith('.json')) {
       try {
-        const fileResponse = await fetch(item.download_url);
-        const fileContent = await fileResponse.json();
+        console.log('[n8n-ext] Processing file:', item.name, item.path);
+        
+        let fileContent;
+        
+        // Directory listings don't include content field - need to fetch file individually
+        if (item.content) {
+          // Content is already in response (single file fetch)
+          fileContent = JSON.parse(atob(item.content.replace(/\s/g, '')));
+        } else {
+          // Need to fetch file content using the file's API URL
+          console.log('[n8n-ext] Fetching file content from API:', item.url);
+          const fileResponse = await fetch(item.url, {
+            headers: {
+              'Authorization': `token ${githubToken}`,
+              'Accept': 'application/vnd.github.v3+json'
+            }
+          });
+          
+          if (!fileResponse.ok) {
+            console.error('[n8n-ext] Failed to fetch file:', item.name, fileResponse.status);
+            continue;
+          }
+          
+          const fileData = await fileResponse.json();
+          if (!fileData.content) {
+            console.error('[n8n-ext] File response has no content:', item.name);
+            continue;
+          }
+          
+          fileContent = JSON.parse(atob(fileData.content.replace(/\s/g, '')));
+        }
+        
+        // Validate it's a workflow object
+        if (!fileContent || typeof fileContent !== 'object') {
+          console.warn('[n8n-ext] File is not valid JSON object:', item.name);
+          continue;
+        }
+        
         workflowFiles.push({
           name: fileContent.name || item.name.replace('.json', ''),
           path: item.path,
@@ -1361,17 +1457,21 @@ async function listWorkflowFiles(owner, repo, pathPattern, branch, githubToken) 
           lastModified: item.updated_at || item.created_at,
           content: fileContent
         });
+        console.log('[n8n-ext] Added workflow file:', fileContent.name || item.name);
       } catch (e) {
         // Skip files that aren't valid JSON workflows
+        console.error('[n8n-ext] Error processing file:', item.name, e.message || e);
         continue;
       }
     } else if (item.type === 'dir') {
       // Recursively search subdirectories
+      console.log('[n8n-ext] Found directory, searching recursively:', item.path);
       const subFiles = await listWorkflowFilesRecursive(owner, repo, pathPattern, branch, githubToken, item.path);
       workflowFiles.push(...subFiles);
     }
   }
   
+  console.log('[n8n-ext] Total workflow files found:', workflowFiles.length);
   return workflowFiles;
 }
 
@@ -1396,8 +1496,14 @@ async function listWorkflowFilesRecursive(owner, repo, pathPattern, branch, gith
     if (!Array.isArray(contents)) {
       if (contents.type === 'file' && contents.name.endsWith('.json')) {
         try {
-          const fileResponse = await fetch(contents.download_url);
-          const fileContent = await fileResponse.json();
+          // Use the content field directly from GitHub API response (it's base64 encoded)
+          if (!contents.content) {
+            return workflowFiles;
+          }
+          
+          // Decode base64 content
+          const fileContent = JSON.parse(atob(contents.content.replace(/\s/g, '')));
+          
           workflowFiles.push({
             name: fileContent.name || contents.name.replace('.json', ''),
             path: contents.path,
@@ -1416,8 +1522,33 @@ async function listWorkflowFilesRecursive(owner, repo, pathPattern, branch, gith
     for (const item of contents) {
       if (item.type === 'file' && item.name.endsWith('.json')) {
         try {
-          const fileResponse = await fetch(item.download_url);
-          const fileContent = await fileResponse.json();
+          let fileContent;
+          
+          // Directory listings don't include content field - need to fetch file individually
+          if (item.content) {
+            // Content is already in response (single file fetch)
+            fileContent = JSON.parse(atob(item.content.replace(/\s/g, '')));
+          } else {
+            // Need to fetch file content using the file's API URL
+            const fileResponse = await fetch(item.url, {
+              headers: {
+                'Authorization': `token ${githubToken}`,
+                'Accept': 'application/vnd.github.v3+json'
+              }
+            });
+            
+            if (!fileResponse.ok) {
+              continue;
+            }
+            
+            const fileData = await fileResponse.json();
+            if (!fileData.content) {
+              continue;
+            }
+            
+            fileContent = JSON.parse(atob(fileData.content.replace(/\s/g, '')));
+          }
+          
           workflowFiles.push({
             name: fileContent.name || item.name.replace('.json', ''),
             path: item.path,
@@ -1451,12 +1582,30 @@ async function getWorkflowFile(owner, repo, filePath, branch, githubToken) {
   });
   
   if (!response.ok) {
+    if (response.status === 404) {
+      throw new Error(`Workflow file not found: ${filePath} (branch: ${branch || 'main'})`);
+    }
     const errorText = await response.text();
-    throw new Error(`Failed to get file: ${response.status} ${errorText}`);
+    throw new Error(`Failed to get file from GitHub: ${response.status} ${errorText}`);
   }
   
   const file = await response.json();
   const content = JSON.parse(atob(file.content.replace(/\s/g, '')));
+  
+  // Validate that content is a valid workflow object
+  console.log('[n8n-ext] Parsed workflow file:', {
+    hasContent: !!content,
+    contentType: typeof content,
+    contentKeys: content ? Object.keys(content) : [],
+    hasNodes: !!content?.nodes,
+    nodesType: typeof content?.nodes,
+    nodesIsArray: Array.isArray(content?.nodes),
+    nodesCount: content?.nodes?.length || 0
+  });
+  
+  if (!content || typeof content !== 'object') {
+    throw new Error('Invalid workflow file: content is not a valid JSON object');
+  }
   
   return {
     name: content.name || filePath.split('/').pop().replace('.json', ''),
@@ -1468,6 +1617,12 @@ async function getWorkflowFile(owner, repo, filePath, branch, githubToken) {
 
 // Pull workflow from GitHub and return workflow data
 async function pullWorkflowFromGitHub(instanceUrl, filePath, branch) {
+  console.log('[n8n-ext] pullWorkflowFromGitHub called:', {
+    instanceUrl,
+    filePath,
+    branch
+  });
+  
   const config = await getConfig(instanceUrl);
   
   if (!config.githubRepo || !config.githubToken) {
@@ -1480,7 +1635,45 @@ async function pullWorkflowFromGitHub(instanceUrl, filePath, branch) {
   }
   
   const targetBranch = branch || config.defaultBranch || 'main';
-  return await getWorkflowFile(owner, repo, filePath, targetBranch, config.githubToken);
+  const result = await getWorkflowFile(owner, repo, filePath, targetBranch, config.githubToken);
+  
+  console.log('[n8n-ext] pullWorkflowFromGitHub result:', {
+    hasResult: !!result,
+    hasContent: !!result?.content,
+    name: result?.name,
+    contentKeys: result?.content ? Object.keys(result.content) : []
+  });
+  
+  return result;
+}
+
+// List all workflows from n8n
+async function listN8nWorkflows(instanceUrl) {
+  const config = await getConfig(instanceUrl);
+  
+  if (!config.n8nUrl || !config.n8nApiKey) {
+    throw new Error('n8n URL or API key not configured');
+  }
+  
+  const url = `${config.n8nUrl.replace(/\/$/, '')}/api/v1/workflows`;
+  const response = await fetch(url, {
+    headers: {
+      'X-N8N-API-KEY': config.n8nApiKey,
+      'Content-Type': 'application/json'
+    }
+  });
+  
+  if (!response.ok) {
+    if (response.status === 404) {
+      // API endpoint not found - might be older n8n version, return empty array
+      return [];
+    }
+    const errorText = await response.text();
+    throw new Error(`Failed to list workflows: ${response.status} ${errorText}`);
+  }
+  
+  const workflows = await response.json();
+  return workflows.data || [];
 }
 
 // Find workflow by name in n8n
@@ -1503,6 +1696,16 @@ async function findWorkflowByName(n8nUrl, apiKey, workflowName) {
 
 // Import workflow to n8n (create or update)
 async function importWorkflowToN8n(instanceUrl, workflowData, workflowName, workflowId = null) {
+  // Step 7 & 8: Verify workflow data structure and import method
+  console.log('[n8n-ext] Importing workflow:', {
+    workflowName,
+    workflowId,
+    hasWorkflowData: !!workflowData,
+    workflowDataKeys: workflowData ? Object.keys(workflowData) : [],
+    workflowDataType: typeof workflowData,
+    instanceUrl
+  });
+  
   const config = await getConfig(instanceUrl);
   
   if (!config.n8nUrl || !config.n8nApiKey) {
@@ -1511,30 +1714,121 @@ async function importWorkflowToN8n(instanceUrl, workflowData, workflowName, work
   
   const n8nUrl = config.n8nUrl.replace(/\/$/, '');
   
-  // Prepare workflow data
-  const workflowPayload = {
-    ...workflowData,
-    name: workflowName
-  };
+  // Validate workflow data structure
+  if (!workflowData || typeof workflowData !== 'object') {
+    console.error('[n8n-ext] Invalid workflow data:', workflowData);
+    throw new Error('Invalid workflow data: must be an object');
+  }
+  
+  // Check if workflowData has nodes property (required by n8n)
+  if (!workflowData.nodes || !Array.isArray(workflowData.nodes)) {
+    console.error('[n8n-ext] Workflow data missing nodes:', {
+      workflowDataKeys: Object.keys(workflowData),
+      workflowDataType: typeof workflowData,
+      hasNodes: !!workflowData.nodes,
+      nodesType: typeof workflowData.nodes,
+      workflowDataSample: JSON.stringify(workflowData).substring(0, 500)
+    });
+    throw new Error('Invalid workflow data: missing required property "nodes" (must be an array)');
+  }
+  
+  // Prepare workflow data - filter to only include properties allowed by n8n API
+  // For PUT requests, n8n is VERY strict - only core workflow properties are allowed
+  // Based on n8n API docs, PUT requests typically only accept: name, nodes, connections, settings, staticData
+  const allowedProperties = workflowId 
+    ? [
+        // For PUT (update) - minimal set
+        'name',
+        'nodes',
+        'connections',
+        'settings',
+        'staticData'
+      ]
+    : [
+        // For POST (create) - can include more
+        'name',
+        'nodes',
+        'connections',
+        'settings',
+        'staticData',
+        'meta',
+        'pinData',
+        'tags'
+      ];
+  
+  const workflowPayload = {};
+  
+  // Only include allowed properties
+  allowedProperties.forEach(prop => {
+    if (workflowData[prop] !== undefined) {
+      workflowPayload[prop] = workflowData[prop];
+    }
+  });
+  
+  // Always set the name (may override existing name)
+  workflowPayload.name = workflowName;
+  
+  // Step 8: Import method verification
+  const url = `${n8nUrl}/api/v1/workflows${workflowId ? `/${workflowId}` : ''}`;
+  const method = workflowId ? 'PUT' : 'POST';
+  
+  // Log exactly what we're sending
+  const payloadKeys = Object.keys(workflowPayload);
+  const originalKeys = Object.keys(workflowData);
+  const filteredOut = originalKeys.filter(k => !allowedProperties.includes(k));
+  
+  console.log('[n8n-ext] Sending import request:', {
+    url: url,
+    method: method,
+    payloadKeys: payloadKeys,
+    payloadKeysCount: payloadKeys.length,
+    originalDataKeys: originalKeys,
+    originalDataKeysCount: originalKeys.length,
+    filteredOutProperties: filteredOut,
+    hasNodes: !!workflowPayload.nodes,
+    nodesCount: workflowPayload.nodes?.length || 0,
+    hasConnections: !!workflowPayload.connections,
+    hasName: !!workflowPayload.name,
+    payloadSample: JSON.stringify(workflowPayload).substring(0, 200)
+  });
   
   // If workflowId is provided, update the existing workflow directly
   if (workflowId) {
-    workflowPayload.id = workflowId;
+    // Note: workflowId goes in URL, NOT in body for PUT requests
+    // Double-check: ensure payload only has allowed properties
+    const finalPayload = {};
+    ['name', 'nodes', 'connections', 'settings', 'staticData'].forEach(prop => {
+      if (workflowPayload[prop] !== undefined) {
+        finalPayload[prop] = workflowPayload[prop];
+      }
+    });
+    
+    console.log('[n8n-ext] Updating existing workflow:', workflowId);
+    console.log('[n8n-ext] Final payload keys:', Object.keys(finalPayload));
+    console.log('[n8n-ext] Final payload sample:', JSON.stringify(finalPayload).substring(0, 300));
+    
     const response = await fetch(`${n8nUrl}/api/v1/workflows/${workflowId}`, {
       method: 'PUT',
       headers: {
         'X-N8N-API-KEY': config.n8nApiKey,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(workflowPayload)
+      body: JSON.stringify(finalPayload)
     });
+    
+    console.log('[n8n-ext] Update response status:', response.status, response.statusText);
     
     if (!response.ok) {
       const errorText = await response.text();
+      console.error('[n8n-ext] Update failed:', response.status, errorText);
       throw new Error(`Failed to update workflow: ${response.status} ${errorText}`);
     }
     
     const updated = await response.json();
+    console.log('[n8n-ext] Workflow updated successfully:', {
+      id: updated.id,
+      name: updated.name
+    });
     return {
       action: 'updated',
       workflowId: updated.id,
@@ -1547,22 +1841,39 @@ async function importWorkflowToN8n(instanceUrl, workflowData, workflowName, work
   
   if (existingWorkflow) {
     // Update existing workflow
-    workflowPayload.id = existingWorkflow.id;
+    // Note: workflowId goes in URL, NOT in body for PUT requests
+    // Double-check: ensure payload only has allowed properties
+    const finalPayload = {};
+    ['name', 'nodes', 'connections', 'settings', 'staticData'].forEach(prop => {
+      if (workflowPayload[prop] !== undefined) {
+        finalPayload[prop] = workflowPayload[prop];
+      }
+    });
+    
+    console.log('[n8n-ext] Updating existing workflow by name:', existingWorkflow.id);
+    console.log('[n8n-ext] Final payload keys:', Object.keys(finalPayload));
     const response = await fetch(`${n8nUrl}/api/v1/workflows/${existingWorkflow.id}`, {
       method: 'PUT',
       headers: {
         'X-N8N-API-KEY': config.n8nApiKey,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(workflowPayload)
+      body: JSON.stringify(finalPayload)
     });
+    
+    console.log('[n8n-ext] Update response status:', response.status, response.statusText);
     
     if (!response.ok) {
       const errorText = await response.text();
+      console.error('[n8n-ext] Update failed:', response.status, errorText);
       throw new Error(`Failed to update workflow: ${response.status} ${errorText}`);
     }
     
     const updated = await response.json();
+    console.log('[n8n-ext] Workflow updated successfully:', {
+      id: updated.id,
+      name: updated.name
+    });
     return {
       action: 'updated',
       workflowId: updated.id,
@@ -1571,6 +1882,7 @@ async function importWorkflowToN8n(instanceUrl, workflowData, workflowName, work
   } else {
     // Create new workflow
     delete workflowPayload.id; // Remove ID for new workflow
+    console.log('[n8n-ext] Creating new workflow');
     const response = await fetch(`${n8nUrl}/api/v1/workflows`, {
       method: 'POST',
       headers: {
@@ -1580,12 +1892,19 @@ async function importWorkflowToN8n(instanceUrl, workflowData, workflowName, work
       body: JSON.stringify(workflowPayload)
     });
     
+    console.log('[n8n-ext] Create response status:', response.status, response.statusText);
+    
     if (!response.ok) {
       const errorText = await response.text();
+      console.error('[n8n-ext] Create failed:', response.status, errorText);
       throw new Error(`Failed to create workflow: ${response.status} ${errorText}`);
     }
     
     const created = await response.json();
+    console.log('[n8n-ext] Workflow created successfully:', {
+      id: created.id,
+      name: created.name
+    });
     return {
       action: 'created',
       workflowId: created.id,
