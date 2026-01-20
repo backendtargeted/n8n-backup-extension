@@ -630,3 +630,166 @@
   }
 }
 
+/* Modal Overlay */
+.n8n-github-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  backdrop-filter: blur(2px);
+}
+
+.n8n-github-modal {
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+  width: 90%;
+  max-width: 600px;
+  max-height: 90vh;
+  overflow-y: auto;
+  animation: slideIn 0.2s ease;
+}
+
+.n8n-github-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.n8n-github-modal-header h3 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.n8n-github-modal-close {
+  background: none;
+  border: none;
+  font-size: 28px;
+  color: #6b7280;
+  cursor: pointer;
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: background-color 0.2s ease;
+}
+
+.n8n-github-modal-close:hover {
+  background: #f3f4f6;
+  color: #1f2937;
+}
+
+.n8n-github-modal-body {
+  padding: 20px;
+}
+
+.n8n-github-modal-body select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 14px;
+  background: white;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  box-sizing: border-box;
+}
+
+.n8n-github-modal-body select:focus {
+  outline: none;
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+
+/* Dark mode for modals */
+@media (prefers-color-scheme: dark) {
+  .n8n-github-modal {
+    background: #1f2937;
+    color: #f9fafb;
+  }
+  
+  .n8n-github-modal-header {
+    border-bottom-color: #374151;
+  }
+  
+  .n8n-github-modal-header h3 {
+    color: #f9fafb;
+  }
+  
+  .n8n-github-modal-close {
+    color: #9ca3af;
+  }
+  
+  .n8n-github-modal-close:hover {
+    background: #374151;
+    color: #f9fafb;
+  }
+  
+  .n8n-github-modal-body select {
+    background: #111827;
+    border-color: #374151;
+    color: #f9fafb;
+  }
+  
+  .n8n-github-modal-body select:focus {
+    border-color: #6366f1;
+  }
+}
+
+/* Workflow List Styles */
+.n8n-workflow-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.n8n-workflow-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 2px solid #e5e7eb;
+  border-radius: 6px;
+  background: #f9fafb;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.n8n-workflow-item:hover {
+  border-color: #6366f1;
+  background: #f3f4f6;
+}
+
+.n8n-workflow-item input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+  flex-shrink: 0;
+  accent-color: #6366f1;
+}
+
+/* Dark mode for workflow list */
+@media (prefers-color-scheme: dark) {
+  .n8n-workflow-item {
+    background: #111827;
+    border-color: #374151;
+  }
+  
+  .n8n-workflow-item:hover {
+    background: #1f2937;
+    border-color: #6366f1;
+  }
+}
+

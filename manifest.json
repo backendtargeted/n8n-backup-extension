@@ -10,23 +10,31 @@
     "tabs"
   ],
   "host_permissions": [
-    "https://api.github.com/*",
-    "<all_urls>"
+    "https://api.github.com/*"
   ],
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": [
+        "*://*/workflow/*",
+        "*://localhost:*/*",
+        "*://127.0.0.1:*/*"
+      ],
+      "exclude_matches": [
+        "*://api.github.com/*"
+      ],
       "js": ["content.js"],
       "css": ["styles.css"],
       "run_at": "document_idle"
     }
   ],
+  "content_security_policy": {
+    "extension_pages": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src https://api.github.com https://* http://127.0.0.1:* http://localhost:*;"
+  },
   "background": {
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "n8n Version Control",
-    "default_popup": "popup.html"
+    "default_title": "n8n Version Control"
   }
 }
 

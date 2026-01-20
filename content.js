@@ -1,10 +1,82 @@
 // Content script for n8n GitHub Backup Extension
 
-const DEBUG = true; // Set to false to disable console logs
+// Check if we're on an n8n workflow page
+function isN8nPage() {
+  const url = window.location.href;
+  // Check URL pattern for workflow pages (exclude /workflow/new)
+  const hasWorkflowPath = url.includes('/workflow/') && !url.includes('/workflow/new');
+  
+  // Check for n8n markers in DOM (may not be present on initial load)
+  const hasN8nMarker = document.querySelector('[data-n8n-root]') !== null;
+  const hasN8nClass = document.querySelector('.n8n-workflow') !== null;
+  const hasN8nId = document.getElementById('n8n-app') !== null;
+  
+  return hasWorkflowPath || hasN8nMarker || hasN8nClass || hasN8nId;
+}
+
+const DEBUG = false; // Set to false in production
+
+// Redact sensitive data from logs
+function redactSensitiveData(text) {
+  if (typeof text !== 'string') return text;
+  
+  return text
+    .replace(/ghp_[A-Za-z0-9_]{20,}/g, 'ghp_REDACTED')
+    .replace(/github_pat_[A-Za-z0-9_]{20,}/g, 'github_pat_REDACTED')
+    .replace(/X-N8N-API-KEY:\s*[^\s]+/gi, 'X-N8N-API-KEY: REDACTED')
+    .replace(/Authorization:\s*token\s+[^\s]+/gi, 'Authorization: token REDACTED');
+}
+
+function sanitizeObject(obj) {
+  if (typeof obj !== 'object' || obj === null) return obj;
+  
+  const sanitized = { ...obj };
+  const sensitiveKeys = ['n8nApiKey', 'githubToken', 'apiKey', 'token', 'password'];
+  
+  for (const key of sensitiveKeys) {
+    if (sanitized[key]) {
+      sanitized[key] = '[REDACTED]';
+    }
+  }
+  
+  return sanitized;
+}
 
 function log(...args) {
   if (DEBUG) {
-    console.log('[n8n GitHub Extension]', ...args);
+    // Redact sensitive data before logging
+    const sanitized = args.map(arg => {
+      if (typeof arg === 'string') {
+        return redactSensitiveData(arg);
+      }
+      if (typeof arg === 'object') {
+        return sanitizeObject(arg);
+      }
+      return arg;
+    });
+    console.log('[n8n GitHub Extension]', ...sanitized);
+  }
+}
+
+// Safe message sender that handles extension context invalidation
+async function sendMessageSafe(request) {
+  try {
+    return await chrome.runtime.sendMessage(request);
+  } catch (error) {
+    // Check for extension context invalidation
+    const isInvalidated = error.message?.includes('Extension context invalidated') || 
+                         chrome.runtime.lastError?.message?.includes('Extension context invalidated') ||
+                         error.message?.includes('message port closed');
+    
+    if (isInvalidated) {
+      // Extension was reloaded - show user-friendly message
+      showNotification(
+        'Extension was reloaded. Please refresh this page to continue using the extension.',
+        'error'
+      );
+      throw new Error('Extension context invalidated. Please refresh the page.');
+    }
+    throw error;
   }
 }
 
@@ -37,17 +109,13 @@ function getWorkflowId() {
 // Get current n8n instance URL (normalized)
 function getInstanceUrl() {
   const origin = window.location.origin;
-  log('getInstanceUrl:', origin);
+  log('getInstanceUrl:', redactSensitiveData(origin));
   return origin;
 }
 
 // Find header element with multiple strategies
 function findHeader() {
   log('Finding header element...');
-  
-  // #region agent log
-  fetch('http://127.0.0.1:7251/ingest/1fcf315c-cfaf-4e58-9364-1acdfd5b87b8',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.js:findHeader:entry',message:'findHeader called',data:{timestamp:Date.now()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
   
   // Strategy 1: Try common n8n selectors
   const headerSelectors = [
@@ -242,7 +310,7 @@ function createPushButton() {
     const instanceUrl = getInstanceUrl();
     let config = null;
     try {
-      const configResponse = await chrome.runtime.sendMessage({ 
+      const configResponse = await sendMessageSafe({ 
         action: 'getConfig',
         instanceUrl: instanceUrl
       });
@@ -266,22 +334,26 @@ function createPushButton() {
     }
     
     // Show commit message prompt
-    const commitMessage = await showCommitMessagePrompt(config);
-    if (commitMessage === null) {
+    const commitResult = await showCommitMessagePrompt(config);
+    if (commitResult === null) {
       // User cancelled
       return;
     }
+    
+    const commitMessage = commitResult.message;
+    const branch = commitResult.branch;
     
     btn.disabled = true;
     btn.innerHTML = 'Pushing...';
     
     try {
       log('Sending message to background script...');
-      const response = await chrome.runtime.sendMessage({
+      const response = await sendMessageSafe({
         action: 'pushToGit',
         workflowId: workflowId,
         instanceUrl: instanceUrl,
-        commitMessage: commitMessage || undefined
+        commitMessage: commitMessage || undefined,
+        branch: branch || undefined
       });
       
       log('Response from background:', JSON.stringify(response, null, 2));
@@ -316,7 +388,107 @@ function createPushButton() {
     }
   });
   
+  // Add Pull from GitHub button
+  const pullBtn = document.createElement('button');
+  pullBtn.id = 'n8n-github-pull-btn';
+  pullBtn.className = 'n8n-github-sync-btn';
+  pullBtn.innerHTML = 'Pull from GitHub';
+  pullBtn.title = 'Pull workflow from GitHub';
+  pullBtn.style.cssText = 'background: #10b981; margin-right: 8px;';
+  
+  pullBtn.addEventListener('click', async () => {
+    log('Pull button clicked');
+    
+    const instanceUrl = getInstanceUrl();
+    const workflowId = getWorkflowId();
+    
+    if (!workflowId) {
+      showNotification('Error: Could not detect workflow ID', 'error');
+      return;
+    }
+    
+    try {
+      const configResponse = await sendMessageSafe({ 
+        action: 'getConfig',
+        instanceUrl: instanceUrl
+      });
+      
+      if (!configResponse || !configResponse.success || !configResponse.config) {
+        showNotification('Settings not configured', 'error');
+        return;
+      }
+      
+      const config = configResponse.config;
+      if (!config.n8nUrl || !config.n8nApiKey || !config.githubRepo || !config.githubToken) {
+        showNotification('Settings not configured', 'error');
+        return;
+      }
+      
+      // Get workflow name to find file
+      const n8nUrl = config.n8nUrl.replace(/\/$/, '');
+      const workflowUrl = `${n8nUrl}/api/v1/workflows/${workflowId}`;
+      const workflowResponse = await fetch(workflowUrl, {
+        method: 'GET',
+        headers: {
+          'X-N8N-API-KEY': config.n8nApiKey,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      if (!workflowResponse.ok) {
+        throw new Error('Failed to fetch workflow from n8n');
+      }
+      
+      const workflowData = await workflowResponse.json();
+      const workflowName = workflowData.name || `workflow-${workflowId}`;
+      const sanitizedName = workflowName.replace(/[^a-zA-Z0-9-_]/g, '-');
+      const filePath = config.githubPathPattern
+        .replace('{workflow-name}', sanitizedName)
+        .replace('{workflow-id}', workflowId);
+      
+      pullBtn.disabled = true;
+      pullBtn.innerHTML = 'Pulling...';
+      
+      const pullResponse = await sendMessageSafe({
+        action: 'pullWorkflowFromGitHub',
+        instanceUrl: instanceUrl,
+        filePath: filePath,
+        branch: config.defaultBranch || 'main'
+      });
+      
+      if (pullResponse && pullResponse.success) {
+        // Import workflow to n8n
+        const importResponse = await sendMessageSafe({
+          action: 'importWorkflowToN8n',
+          instanceUrl: instanceUrl,
+          workflowData: pullResponse.content.content,
+          workflowName: pullResponse.content.name
+        });
+        
+        if (importResponse && importResponse.success) {
+          const action = importResponse.action === 'updated' ? 'updated' : 'imported';
+          showNotification(`Workflow ${action} successfully!`, 'success');
+          // Reload page to show updated workflow
+          setTimeout(() => {
+            window.location.reload();
+          }, 1500);
+        } else {
+          throw new Error(importResponse?.error || 'Failed to import workflow');
+        }
+      } else {
+        throw new Error(pullResponse?.error || 'Failed to pull workflow');
+      }
+    } catch (error) {
+      log('Error pulling workflow:', error);
+      showNotification(`Error: ${error.message}`, 'error');
+    } finally {
+      pullBtn.disabled = false;
+      pullBtn.innerHTML = 'Pull from GitHub';
+    }
+  });
+  
   container.appendChild(btn);
+  container.appendChild(pullBtn);
   container.appendChild(settingsIcon);
   
   return container;
@@ -454,10 +626,164 @@ function injectSettingsStyles(shadowRoot) {
       border-radius: 8px;
       box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
       width: 90%;
-      max-width: 600px;
-      max-height: 90vh;
-      overflow-y: auto;
+      max-width: 1200px;
+      height: 90vh;
+      display: flex;
       animation: slideIn 0.2s ease;
+      overflow: hidden;
+    }
+    
+    .n8n-settings-sidebar {
+      width: 350px;
+      border-right: 1px solid #e5e7eb;
+      display: flex;
+      flex-direction: column;
+      background: #f9fafb;
+    }
+    
+    .n8n-settings-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 20px;
+      border-bottom: 1px solid #e5e7eb;
+      background: white;
+    }
+    
+    .n8n-settings-header h3 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 600;
+      color: #1f2937;
+    }
+    
+    .n8n-settings-close {
+      background: none;
+      border: none;
+      font-size: 24px;
+      color: #6b7280;
+      cursor: pointer;
+      padding: 4px;
+      width: 28px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
+      transition: background-color 0.2s ease;
+    }
+    
+    .n8n-settings-close:hover {
+      background: #f3f4f6;
+      color: #1f2937;
+    }
+    
+    .n8n-settings-search {
+      padding: 12px 20px;
+      border-bottom: 1px solid #e5e7eb;
+      background: white;
+    }
+    
+    .n8n-settings-search input {
+      width: 100%;
+      padding: 8px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-size: 14px;
+      box-sizing: border-box;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+    
+    .n8n-settings-search input:focus {
+      outline: none;
+      border-color: #6366f1;
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+    }
+    
+    .n8n-instance-list-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+    }
+    
+    .n8n-settings-sidebar-footer {
+      padding: 16px 20px;
+      border-top: 1px solid #e5e7eb;
+      background: white;
+    }
+    
+    .n8n-add-instance-btn {
+      width: 100%;
+      padding: 10px 16px;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      background: #6366f1;
+      color: white;
+      transition: background-color 0.2s ease;
+    }
+    
+    .n8n-add-instance-btn:hover {
+      background: #4f46e5;
+    }
+    
+    .n8n-settings-details-panel {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: white;
+    }
+    
+    .n8n-details-header {
+      padding: 20px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    
+    .n8n-details-header h4 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 600;
+      color: #1f2937;
+    }
+    
+    .n8n-details-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+    }
+    
+    .n8n-empty-state {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      color: #6b7280;
+      font-size: 14px;
+    }
+    
+    .n8n-instance-item {
+      cursor: pointer;
+      padding: 12px;
+      border-radius: 6px;
+      margin-bottom: 8px;
+      transition: background-color 0.2s ease, border-color 0.2s ease;
+      border: 1px solid transparent;
+    }
+    
+    .n8n-instance-item:hover {
+      background: #f3f4f6;
+    }
+    
+    .n8n-instance-item.selected {
+      background: #ede9fe;
+      border-color: #6366f1;
+    }
+    
+    .n8n-instance-item.selected .n8n-instance-url {
+      color: #6366f1;
     }
     
     @keyframes slideIn {
@@ -599,21 +925,6 @@ function injectSettingsStyles(shadowRoot) {
       gap: 12px;
     }
     
-    .n8n-instance-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 16px;
-      border: 1px solid #e5e7eb;
-      border-radius: 8px;
-      background: #f9fafb;
-      transition: background-color 0.2s ease, border-color 0.2s ease;
-    }
-    
-    .n8n-instance-item:hover {
-      background: #f3f4f6;
-      border-color: #d1d5db;
-    }
     
     .n8n-instance-info {
       flex: 1;
@@ -624,11 +935,15 @@ function injectSettingsStyles(shadowRoot) {
       font-weight: 600;
       color: #1f2937;
       font-size: 14px;
-      margin-bottom: 6px;
+      margin-bottom: 4px;
       word-break: break-all;
-      pointer-events: none;
       user-select: text;
-      cursor: text;
+    }
+    
+    .n8n-instance-meta {
+      font-size: 12px;
+      color: #6b7280;
+      margin-top: 4px;
     }
     
     .n8n-instance-current-badge {
@@ -642,50 +957,108 @@ function injectSettingsStyles(shadowRoot) {
       font-weight: 500;
     }
     
-    .n8n-instance-details {
-      display: flex;
-      gap: 16px;
-      font-size: 12px;
-      color: #6b7280;
+    .n8n-detail-field {
+      margin-bottom: 20px;
     }
     
-    .n8n-instance-details span {
-      white-space: nowrap;
-    }
-    
-    .n8n-instance-actions {
+    .n8n-detail-field-label {
       display: flex;
+      align-items: center;
       gap: 8px;
-      margin-left: 16px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
     }
     
-    .n8n-instance-edit-btn,
-    .n8n-instance-delete-btn {
-      padding: 6px 12px;
+    .n8n-detail-field-value {
+      font-size: 14px;
+      color: #1f2937;
+      word-break: break-all;
+    }
+    
+    .n8n-detail-field-value a {
+      color: #6366f1;
+      text-decoration: none;
+    }
+    
+    .n8n-detail-field-value a:hover {
+      text-decoration: underline;
+    }
+    
+    .n8n-detail-actions {
+      display: flex;
+      gap: 12px;
+      margin-top: 24px;
+      padding-top: 24px;
+      border-top: 1px solid #e5e7eb;
+    }
+    
+    .n8n-detail-btn {
+      padding: 10px 16px;
       border: none;
       border-radius: 6px;
-      font-size: 13px;
+      font-size: 14px;
       font-weight: 500;
       cursor: pointer;
       transition: background-color 0.2s ease;
     }
     
-    .n8n-instance-edit-btn {
+    .n8n-detail-btn-primary {
       background: #6366f1;
       color: white;
     }
     
-    .n8n-instance-edit-btn:hover {
+    .n8n-detail-btn-primary:hover {
       background: #4f46e5;
     }
     
-    .n8n-instance-delete-btn {
+    .n8n-detail-btn-danger {
       background: #ef4444;
       color: white;
     }
     
-    .n8n-instance-delete-btn:hover {
+    .n8n-detail-btn-danger:hover {
       background: #dc2626;
+    }
+    
+    .n8n-detail-btn-secondary {
+      background: #f3f4f6;
+      color: #374151;
+    }
+    
+    .n8n-detail-btn-secondary:hover {
+      background: #e5e7eb;
+    }
+    
+    .n8n-status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 8px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+    
+    .n8n-status-badge.success {
+      background: #d1fae5;
+      color: #065f46;
+    }
+    
+    .n8n-status-badge.warning {
+      background: #fef3c7;
+      color: #92400e;
+    }
+    
+    .n8n-icon {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      text-align: center;
+      line-height: 16px;
     }
     
     .n8n-github-settings-message {
@@ -714,21 +1087,101 @@ function injectSettingsStyles(shadowRoot) {
         color: #f9fafb;
       }
       
-      .n8n-github-settings-header {
+      .n8n-settings-sidebar {
+        background: #111827;
+        border-right-color: #374151;
+      }
+      
+      .n8n-settings-header {
+        background: #1f2937;
         border-bottom-color: #374151;
       }
       
-      .n8n-github-settings-header h3 {
+      .n8n-settings-header h3 {
         color: #f9fafb;
       }
       
-      .n8n-github-settings-close {
+      .n8n-settings-close {
         color: #9ca3af;
       }
       
-      .n8n-github-settings-close:hover {
+      .n8n-settings-close:hover {
         background: #374151;
         color: #f9fafb;
+      }
+      
+      .n8n-settings-search {
+        background: #1f2937;
+        border-bottom-color: #374151;
+      }
+      
+      .n8n-settings-search input {
+        background: #111827;
+        border-color: #374151;
+        color: #f9fafb;
+      }
+      
+      .n8n-settings-search input:focus {
+        border-color: #6366f1;
+      }
+      
+      .n8n-settings-sidebar-footer {
+        background: #1f2937;
+        border-top-color: #374151;
+      }
+      
+      .n8n-settings-details-panel {
+        background: #1f2937;
+      }
+      
+      .n8n-details-header {
+        border-bottom-color: #374151;
+      }
+      
+      .n8n-details-header h4 {
+        color: #f9fafb;
+      }
+      
+      .n8n-empty-state {
+        color: #9ca3af;
+      }
+      
+      .n8n-instance-item:hover {
+        background: #374151;
+      }
+      
+      .n8n-instance-item.selected {
+        background: #312e81;
+        border-color: #6366f1;
+      }
+      
+      .n8n-instance-url {
+        color: #f9fafb;
+      }
+      
+      .n8n-instance-meta {
+        color: #9ca3af;
+      }
+      
+      .n8n-detail-field-label {
+        color: #9ca3af;
+      }
+      
+      .n8n-detail-field-value {
+        color: #f9fafb;
+      }
+      
+      .n8n-detail-actions {
+        border-top-color: #374151;
+      }
+      
+      .n8n-detail-btn-secondary {
+        background: #374151;
+        color: #e5e7eb;
+      }
+      
+      .n8n-detail-btn-secondary:hover {
+        background: #4b5563;
       }
       
       .n8n-github-settings-field label {
@@ -759,23 +1212,49 @@ function injectSettingsStyles(shadowRoot) {
       .n8n-github-settings-cancel:hover {
         background: #4b5563;
       }
-      
-      .n8n-instance-item {
+    }
+    
+    /* Workflow List Styles */
+    .n8n-workflow-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    
+    .n8n-workflow-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      border: 2px solid #e5e7eb;
+      border-radius: 6px;
+      background: #f9fafb;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    
+    .n8n-workflow-item:hover {
+      border-color: #6366f1;
+      background: #f3f4f6;
+    }
+    
+    .n8n-workflow-item input[type="checkbox"] {
+      width: 20px;
+      height: 20px;
+      cursor: pointer;
+      flex-shrink: 0;
+      accent-color: #6366f1;
+    }
+    
+    @media (prefers-color-scheme: dark) {
+      .n8n-workflow-item {
         background: #111827;
         border-color: #374151;
       }
       
-      .n8n-instance-item:hover {
+      .n8n-workflow-item:hover {
         background: #1f2937;
-        border-color: #4b5563;
-      }
-      
-      .n8n-instance-url {
-        color: #f9fafb;
-      }
-      
-      .n8n-instance-details {
-        color: #9ca3af;
+        border-color: #6366f1;
       }
     }
   `;
@@ -806,14 +1285,33 @@ function injectSettingsPanel() {
   
   panel.innerHTML = `
     <div class="n8n-github-settings-content">
-      <div class="n8n-github-settings-header">
-        <div>
-          <h3>n8n GitHub Backup Settings</h3>
+      <!-- Left Sidebar -->
+      <div class="n8n-settings-sidebar">
+        <div class="n8n-settings-header">
+          <h3>n8n Instances</h3>
+          <button class="n8n-settings-close" id="n8n-github-settings-close">×</button>
         </div>
-        <button class="n8n-github-settings-close" id="n8n-github-settings-close">×</button>
+        <div class="n8n-settings-search">
+          <input type="text" id="n8n-instance-search" placeholder="Search instances..." autocomplete="off" />
+        </div>
+        <div class="n8n-instance-list-container" id="n8n-instance-list-container">
+          <!-- Instance list will be dynamically loaded -->
+        </div>
+        <div class="n8n-settings-sidebar-footer">
+          <button class="n8n-add-instance-btn" id="n8n-add-instance-btn">+ Add Instance</button>
+        </div>
       </div>
-      <div class="n8n-github-settings-body" id="n8n-github-settings-body">
-        <!-- Content will be dynamically loaded -->
+      
+      <!-- Right Panel -->
+      <div class="n8n-settings-details-panel">
+        <div class="n8n-details-header">
+          <h4 id="n8n-details-title">Instance Details</h4>
+        </div>
+        <div class="n8n-details-content" id="n8n-details-content">
+          <div class="n8n-empty-state">
+            <p>Select an instance to view details</p>
+          </div>
+        </div>
       </div>
     </div>
   `;
@@ -829,96 +1327,450 @@ function injectSettingsPanel() {
     });
   }
   
+  const addBtn = shadowRoot.getElementById('n8n-add-instance-btn');
+  if (addBtn) {
+    addBtn.addEventListener('click', () => {
+      log('Add Instance button clicked');
+      showInstanceEditView(null);
+    });
+  }
+  
+  // Search functionality
+  const searchInput = shadowRoot.getElementById('n8n-instance-search');
+  if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+      filterInstances(e.target.value.trim());
+    });
+  }
+  
   // Show list view by default
   showInstanceListView();
 }
 
-// Show instance list view
+// Show instance list view (sidebar)
 async function showInstanceListView() {
   const shadowRoot = getSettingsPanelShadowRoot();
-  const body = shadowRoot.getElementById('n8n-github-settings-body');
-  if (!body) return;
+  const container = shadowRoot.getElementById('n8n-instance-list-container');
+  if (!container) return;
   
   try {
-    const response = await chrome.runtime.sendMessage({ action: 'getAllInstanceConfigs' });
+    const response = await sendMessageSafe({ action: 'getAllInstanceConfigs' });
     const instances = (response && response.success && response.configs) ? response.configs : [];
     const currentInstanceUrl = getInstanceUrl();
     
+    // Sort instances by lastUsed (most recent first), then by creation
+    instances.sort((a, b) => {
+      const aLastUsed = a.lastUsed || 0;
+      const bLastUsed = b.lastUsed || 0;
+      if (bLastUsed !== aLastUsed) {
+        return bLastUsed - aLastUsed;
+      }
+      return (b.id || '').localeCompare(a.id || '');
+    });
+    
     let instancesHtml = '';
     if (instances.length === 0) {
-      instancesHtml = '<p style="text-align: center; color: #6b7280; padding: 20px;">No instances configured. Click "Add New Instance" to get started.</p>';
+      instancesHtml = '<div class="n8n-empty-state" style="padding: 40px 20px;"><p style="text-align: center; color: #6b7280;">No instances configured.<br/>Click "Add Instance" to get started.</p></div>';
     } else {
-      instancesHtml = '<div class="n8n-instance-list">';
       instances.forEach(inst => {
         const normalizedUrl = normalizeInstanceUrl(inst.n8nUrl);
         const isCurrent = normalizeInstanceUrl(currentInstanceUrl) === normalizedUrl;
         const currentBadge = isCurrent ? '<span class="n8n-instance-current-badge">Current</span>' : '';
         
+        // Format last used timestamp
+        let lastUsedText = '';
+        if (inst.lastUsed) {
+          const lastUsedDate = new Date(inst.lastUsed);
+          const now = new Date();
+          const diffMs = now - lastUsedDate;
+          const diffMins = Math.floor(diffMs / 60000);
+          const diffHours = Math.floor(diffMs / 3600000);
+          const diffDays = Math.floor(diffMs / 86400000);
+          
+          if (diffMins < 1) {
+            lastUsedText = 'Just now';
+          } else if (diffMins < 60) {
+            lastUsedText = `${diffMins}m ago`;
+          } else if (diffHours < 24) {
+            lastUsedText = `${diffHours}h ago`;
+          } else if (diffDays < 7) {
+            lastUsedText = `${diffDays}d ago`;
+          } else {
+            lastUsedText = lastUsedDate.toLocaleDateString();
+          }
+        }
+        
         instancesHtml += `
-          <div class="n8n-instance-item">
+          <div class="n8n-instance-item" data-instance-id="${inst.id}">
             <div class="n8n-instance-info">
               <div class="n8n-instance-url">${escapeHtml(inst.n8nUrl)} ${currentBadge}</div>
-              <div class="n8n-instance-details">
-                <span>Repo: ${escapeHtml(inst.githubRepo || 'Not set')}</span>
-                <span>Path: ${escapeHtml(inst.githubPathPattern || 'workflows/{workflow-name}.json')}</span>
+              <div class="n8n-instance-meta">
+                ${inst.githubRepo ? escapeHtml(inst.githubRepo) : 'No repo'}${lastUsedText ? ' • ' + lastUsedText : ''}
               </div>
-            </div>
-            <div class="n8n-instance-actions">
-              <button class="n8n-instance-edit-btn" data-instance-id="${inst.id}">Edit</button>
-              <button class="n8n-instance-delete-btn" data-instance-id="${inst.id}">Delete</button>
             </div>
           </div>
         `;
       });
-      instancesHtml += '</div>';
     }
     
-    body.innerHTML = `
-      <div style="margin-bottom: 16px;">
-        <button id="n8n-add-instance-btn" class="n8n-github-settings-save">+ Add New Instance</button>
-      </div>
-      ${instancesHtml}
-    `;
+    container.innerHTML = instancesHtml;
     
-    // Event listeners
-    const addBtn = shadowRoot.getElementById('n8n-add-instance-btn');
-    if (addBtn) {
-      addBtn.addEventListener('click', () => {
-        log('Add New Instance button clicked');
-        showInstanceEditView(null);
-      });
-    }
-    
-    shadowRoot.querySelectorAll('.n8n-instance-edit-btn').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        const instanceId = e.target.getAttribute('data-instance-id');
-        log('Edit button clicked for instance:', instanceId);
-        showInstanceEditView(instanceId);
+    // Event listeners for instance clicks
+    container.querySelectorAll('.n8n-instance-item').forEach(item => {
+      item.addEventListener('click', (e) => {
+        const instanceId = item.getAttribute('data-instance-id');
+        if (instanceId) {
+          // Remove selected class from all items
+          container.querySelectorAll('.n8n-instance-item').forEach(i => {
+            i.classList.remove('selected');
+          });
+          // Add selected class to clicked item
+          item.classList.add('selected');
+          // Show details in right panel
+          showInstanceDetailsView(instanceId);
+        }
       });
     });
     
-    shadowRoot.querySelectorAll('.n8n-instance-delete-btn').forEach(btn => {
-      btn.addEventListener('click', async (e) => {
-        const instanceId = e.target.getAttribute('data-instance-id');
+    // Auto-select current instance if available
+    if (instances.length > 0) {
+      const currentInstance = instances.find(inst => {
+        const normalizedUrl = normalizeInstanceUrl(inst.n8nUrl);
+        return normalizedUrl === normalizeInstanceUrl(currentInstanceUrl);
+      });
+      
+      if (currentInstance) {
+        const item = container.querySelector(`[data-instance-id="${currentInstance.id}"]`);
+        if (item) {
+          item.classList.add('selected');
+          showInstanceDetailsView(currentInstance.id);
+        }
+      } else {
+        // Select first instance if no current match
+        const firstItem = container.querySelector('.n8n-instance-item');
+        if (firstItem) {
+          firstItem.classList.add('selected');
+          showInstanceDetailsView(firstItem.getAttribute('data-instance-id'));
+        }
+      }
+    }
+  } catch (error) {
+    log('Error loading instances:', error);
+    container.innerHTML = '<div class="n8n-empty-state"><p style="color: #ef4444;">Error loading instances. Please try again.</p></div>';
+  }
+}
+
+// Filter instances by search query
+function filterInstances(searchQuery) {
+  const shadowRoot = getSettingsPanelShadowRoot();
+  const container = shadowRoot.getElementById('n8n-instance-list-container');
+  if (!container) return;
+  
+  const items = container.querySelectorAll('.n8n-instance-item');
+  const query = searchQuery.toLowerCase();
+  
+  if (!query) {
+    // Show all items
+    items.forEach(item => {
+      item.style.display = '';
+    });
+    // Remove no results message if it exists
+    const noResults = container.querySelector('.n8n-no-results');
+    if (noResults) {
+      noResults.remove();
+    }
+    return;
+  }
+  
+  // Filter items
+  items.forEach(item => {
+    const url = item.querySelector('.n8n-instance-url')?.textContent?.toLowerCase() || '';
+    const meta = item.querySelector('.n8n-instance-meta')?.textContent?.toLowerCase() || '';
+    const matches = url.includes(query) || meta.includes(query);
+    item.style.display = matches ? '' : 'none';
+  });
+  
+  // Show "no results" message if all items are hidden
+  const visibleItems = Array.from(items).filter(item => item.style.display !== 'none');
+  if (visibleItems.length === 0 && items.length > 0) {
+    if (!container.querySelector('.n8n-no-results')) {
+      const noResults = document.createElement('div');
+      noResults.className = 'n8n-no-results';
+      noResults.style.cssText = 'padding: 40px 20px; text-align: center; color: #6b7280;';
+      noResults.textContent = 'No instances found matching your search';
+      container.appendChild(noResults);
+    }
+  } else {
+    const noResults = container.querySelector('.n8n-no-results');
+    if (noResults) {
+      noResults.remove();
+    }
+  }
+}
+
+// Show instance details view (right panel)
+async function showInstanceDetailsView(instanceId) {
+  log('showInstanceDetailsView called with instanceId:', instanceId);
+  const shadowRoot = getSettingsPanelShadowRoot();
+  const detailsContent = shadowRoot.getElementById('n8n-details-content');
+  const detailsTitle = shadowRoot.getElementById('n8n-details-title');
+  if (!detailsContent || !detailsTitle) {
+    log('Details panel elements not found!');
+    return;
+  }
+  
+  try {
+    const response = await sendMessageSafe({ 
+      action: 'getInstanceById',
+      instanceId: instanceId
+    });
+    
+    if (!response || !response.success || !response.config) {
+      detailsContent.innerHTML = '<div class="n8n-empty-state"><p style="color: #ef4444;">Error loading instance details.</p></div>';
+      return;
+    }
+    
+    const config = response.config;
+    
+    // Format dates
+    let createdDate = 'Unknown';
+    if (instanceId && instanceId.startsWith('inst_')) {
+      const timestamp = parseInt(instanceId.split('_')[1]);
+      if (!isNaN(timestamp)) {
+        createdDate = new Date(timestamp).toLocaleDateString();
+      }
+    }
+    
+    let lastUsedText = 'Never';
+    if (config.lastUsed) {
+      const lastUsedDate = new Date(config.lastUsed);
+      const now = new Date();
+      const diffMs = now - lastUsedDate;
+      const diffMins = Math.floor(diffMs / 60000);
+      const diffHours = Math.floor(diffMs / 3600000);
+      const diffDays = Math.floor(diffMs / 86400000);
+      
+      if (diffMins < 1) {
+        lastUsedText = 'Just now';
+      } else if (diffMins < 60) {
+        lastUsedText = `${diffMins} minutes ago`;
+      } else if (diffHours < 24) {
+        lastUsedText = `${diffHours} hours ago`;
+      } else if (diffDays < 7) {
+        lastUsedText = `${diffDays} days ago`;
+      } else {
+        lastUsedText = lastUsedDate.toLocaleDateString();
+      }
+    }
+    
+    // Commit message preview (first 60 characters)
+    const commitMessagePreview = config.commitMessage 
+      ? (config.commitMessage.length > 60 ? config.commitMessage.substring(0, 60) + '...' : config.commitMessage)
+      : 'Not set';
+    
+    // Status indicators
+    const hasApiKey = config.n8nApiKey && config.n8nApiKey.trim().length > 0;
+    const hasToken = config.githubToken && config.githubToken.trim().length > 0;
+    const hasRepo = config.githubRepo && config.githubRepo.trim().length > 0;
+    
+    detailsTitle.textContent = 'Instance Details';
+    
+    detailsContent.innerHTML = `
+      <div class="n8n-detail-field">
+        <div class="n8n-detail-field-label">
+          <span class="n8n-icon">🌐</span>
+          Instance URL
+        </div>
+        <div class="n8n-detail-field-value">
+          ${escapeHtml(config.n8nUrl || 'Not set')}
+          <button class="n8n-detail-btn n8n-detail-btn-secondary" style="margin-left: 8px; padding: 4px 8px; font-size: 12px;" onclick="navigator.clipboard.writeText('${escapeHtml(config.n8nUrl || '')}').then(() => alert('URL copied!'))">Copy</button>
+        </div>
+      </div>
+      
+      <div class="n8n-detail-field">
+        <div class="n8n-detail-field-label">
+          <span class="n8n-icon">📦</span>
+          GitHub Repository
+        </div>
+        <div class="n8n-detail-field-value">
+          ${hasRepo ? `<a href="https://github.com/${escapeHtml(config.githubRepo)}" target="_blank">${escapeHtml(config.githubRepo)}</a>` : 'Not set'}
+        </div>
+      </div>
+      
+      <div class="n8n-detail-field">
+        <div class="n8n-detail-field-label">
+          <span class="n8n-icon">📁</span>
+          Path Pattern
+        </div>
+        <div class="n8n-detail-field-value">
+          ${escapeHtml(config.githubPathPattern || 'workflows/{workflow-name}.json')}
+        </div>
+      </div>
+      
+      <div class="n8n-detail-field">
+        <div class="n8n-detail-field-label">
+          <span class="n8n-icon">🌿</span>
+          Default Branch
+        </div>
+        <div class="n8n-detail-field-value">
+          ${escapeHtml(config.defaultBranch || 'main')}
+        </div>
+      </div>
+      
+      <div class="n8n-detail-field">
+        <div class="n8n-detail-field-label">
+          <span class="n8n-icon">💬</span>
+          Commit Message
+        </div>
+        <div class="n8n-detail-field-value">
+          ${escapeHtml(commitMessagePreview)}
+        </div>
+      </div>
+      
+      <div class="n8n-detail-field">
+        <div class="n8n-detail-field-label">
+          <span class="n8n-icon">🔑</span>
+          Credentials Status
+        </div>
+        <div class="n8n-detail-field-value">
+          <span class="n8n-status-badge ${hasApiKey ? 'success' : 'warning'}">${hasApiKey ? '✓' : '✗'} API Key ${hasApiKey ? 'configured' : 'missing'}</span>
+          <span class="n8n-status-badge ${hasToken ? 'success' : 'warning'}" style="margin-left: 8px;">${hasToken ? '✓' : '✗'} Token ${hasToken ? 'configured' : 'missing'}</span>
+        </div>
+      </div>
+      
+      <div class="n8n-detail-field">
+        <div class="n8n-detail-field-label">
+          <span class="n8n-icon">🕒</span>
+          Last Used
+        </div>
+        <div class="n8n-detail-field-value">
+          ${lastUsedText}
+        </div>
+      </div>
+      
+      <div class="n8n-detail-field">
+        <div class="n8n-detail-field-label">
+          <span class="n8n-icon">📅</span>
+          Created
+        </div>
+        <div class="n8n-detail-field-value">
+          ${createdDate}
+        </div>
+      </div>
+      
+      <div class="n8n-detail-actions">
+        <button class="n8n-detail-btn n8n-detail-btn-primary" id="n8n-detail-edit-btn">Edit</button>
+        <button class="n8n-detail-btn n8n-detail-btn-secondary" id="n8n-detail-test-btn">Test Connection</button>
+        <button class="n8n-detail-btn n8n-detail-btn-danger" id="n8n-detail-delete-btn">Delete</button>
+      </div>
+      
+      <div id="n8n-detail-message" class="n8n-github-settings-message"></div>
+    `;
+    
+    // Event listeners
+    const editBtn = shadowRoot.getElementById('n8n-detail-edit-btn');
+    if (editBtn) {
+      editBtn.addEventListener('click', () => {
+        showInstanceEditView(instanceId);
+      });
+    }
+    
+    const deleteBtn = shadowRoot.getElementById('n8n-detail-delete-btn');
+    if (deleteBtn) {
+      deleteBtn.addEventListener('click', async () => {
         if (confirm('Are you sure you want to delete this instance configuration?')) {
           await deleteInstance(instanceId);
         }
       });
-    });
+    }
+    
+    const testBtn = shadowRoot.getElementById('n8n-detail-test-btn');
+    if (testBtn) {
+      testBtn.addEventListener('click', async () => {
+        await testInstanceConnection(config);
+      });
+    }
   } catch (error) {
-    log('Error loading instances:', error);
-    body.innerHTML = '<p style="color: #ef4444;">Error loading instances. Please try again.</p>';
+    log('Error loading instance details:', error);
+    detailsContent.innerHTML = '<div class="n8n-empty-state"><p style="color: #ef4444;">Error loading instance details.</p></div>';
   }
 }
 
-// Normalize instance URL helper
-function normalizeInstanceUrl(url) {
+// Test instance connection
+async function testInstanceConnection(config) {
+  const shadowRoot = getSettingsPanelShadowRoot();
+  const messageEl = shadowRoot.getElementById('n8n-detail-message');
+  if (!messageEl) return;
+  
+  showSettingsMessage('Testing connections...', 'info', messageEl);
+  
   try {
-    const urlObj = new URL(url);
-    return `${urlObj.protocol}//${urlObj.host}`;
+    if (!config.n8nUrl || !config.n8nApiKey || !config.githubRepo || !config.githubToken) {
+      showSettingsMessage('Missing required credentials', 'error', messageEl);
+      return;
+    }
+    
+    // Test n8n connection
+    const n8nTestUrl = config.n8nUrl.replace(/\/$/, '') + '/api/v1/workflows';
+    const n8nResponse = await fetch(n8nTestUrl, {
+      method: 'GET',
+      headers: {
+        'X-N8N-API-KEY': config.n8nApiKey,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    if (!n8nResponse.ok) {
+      throw new Error(`n8n API error: ${n8nResponse.status} ${n8nResponse.statusText}`);
+    }
+    
+    // Test GitHub connection
+    const [owner, repo] = config.githubRepo.split('/');
+    if (!owner || !repo) {
+      throw new Error('Invalid GitHub repository format');
+    }
+    
+    const githubResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
+      headers: {
+        'Authorization': `token ${config.githubToken}`,
+        'Accept': 'application/vnd.github.v3+json'
+      }
+    });
+    
+    if (!githubResponse.ok) {
+      throw new Error(`GitHub API error: ${githubResponse.status} ${githubResponse.statusText}`);
+    }
+    
+    showSettingsMessage('✓ Both connections successful!', 'success', messageEl);
+  } catch (error) {
+    showSettingsMessage(`Connection test failed: ${error.message}`, 'error', messageEl);
+  }
+}
+
+// Normalize instance URL helper (matches background.js logic)
+function normalizeInstanceUrl(url) {
+  if (!url || typeof url !== 'string') {
+    return '';
+  }
+  
+  // Remove trailing slashes
+  const cleaned = url.trim().replace(/\/+$/, '');
+  
+  try {
+    const urlObj = new URL(cleaned);
+    
+    // Normalize to protocol + host (includes port if present)
+    const normalized = `${urlObj.protocol}//${urlObj.host}`;
+    
+    // Convert to lowercase for case-insensitive matching
+    return normalized.toLowerCase();
   } catch (e) {
-    const match = url.match(/^(https?:\/\/[^\/]+)/);
-    return match ? match[1] : url;
+    // If URL parsing fails, try to extract base URL manually
+    const match = cleaned.match(/^(https?:\/\/[^\/]+)/i);
+    if (match) {
+      return match[1].toLowerCase();
+    }
+    return cleaned.toLowerCase();
   }
 }
 
@@ -929,13 +1781,14 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-// Show instance edit view
+// Show instance edit view (right panel)
 async function showInstanceEditView(instanceId) {
   log('showInstanceEditView called with instanceId:', instanceId);
   const shadowRoot = getSettingsPanelShadowRoot();
-  const body = shadowRoot.getElementById('n8n-github-settings-body');
-  if (!body) {
-    log('Settings body not found!');
+  const detailsContent = shadowRoot.getElementById('n8n-details-content');
+  const detailsTitle = shadowRoot.getElementById('n8n-details-title');
+  if (!detailsContent || !detailsTitle) {
+    log('Details panel elements not found!');
     return;
   }
   
@@ -946,13 +1799,14 @@ async function showInstanceEditView(instanceId) {
     githubRepo: '',
     githubToken: '',
     githubPathPattern: 'workflows/{workflow-name}.json',
-    commitMessage: 'Update workflow: {workflow-name}'
+    commitMessage: 'Update workflow: {workflow-name}',
+    defaultBranch: 'main'
   };
   
   if (instanceId) {
     // Editing existing instance - load its config
     try {
-      const response = await chrome.runtime.sendMessage({ 
+      const response = await sendMessageSafe({ 
         action: 'getInstanceById',
         instanceId: instanceId
       });
@@ -969,7 +1823,7 @@ async function showInstanceEditView(instanceId) {
     
     // Also try to load existing config for this URL (if it exists from legacy storage)
     try {
-      const response = await chrome.runtime.sendMessage({ 
+      const response = await sendMessageSafe({ 
         action: 'getConfig',
         instanceUrl: currentUrl
       });
@@ -980,10 +1834,11 @@ async function showInstanceEditView(instanceId) {
           config = {
             ...config,
             n8nApiKey: existingConfig.n8nApiKey || '',
-            githubRepo: existingConfig.githubRepo || '',
-            githubToken: existingConfig.githubToken || '',
-            githubPathPattern: existingConfig.githubPathPattern || config.githubPathPattern,
-            commitMessage: existingConfig.commitMessage || config.commitMessage
+    githubRepo: existingConfig.githubRepo || '',
+    githubToken: existingConfig.githubToken || '',
+    githubPathPattern: existingConfig.githubPathPattern || config.githubPathPattern,
+    commitMessage: existingConfig.commitMessage || config.commitMessage,
+    defaultBranch: existingConfig.defaultBranch || 'main'
           };
         }
       }
@@ -996,68 +1851,108 @@ async function showInstanceEditView(instanceId) {
   const urlReadonly = isNewInstance ? 'readonly' : '';
   const urlNote = isNewInstance ? ' (auto-detected from current page)' : '';
   
-  body.innerHTML = `
+  detailsTitle.textContent = isNewInstance ? 'Add New Instance' : 'Edit Instance';
+  
+  detailsContent.innerHTML = `
     <div style="margin-bottom: 16px;">
-      <button id="n8n-back-to-list-btn" class="n8n-github-settings-cancel">← Back to List</button>
+      <button id="n8n-back-to-details-btn" class="n8n-github-settings-cancel">← Back</button>
     </div>
-    <div class="n8n-github-settings-field">
+        <div class="n8n-github-settings-field">
       <label for="n8n-url">n8n Instance URL *${urlNote}</label>
       <input type="text" id="n8n-url" placeholder="https://n8n.example.com or http://localhost:5678" value="${escapeHtml(config.n8nUrl || '')}" autocomplete="off" data-lpignore="true" ${urlReadonly} style="${urlReadonly ? 'background-color: #f3f4f6; cursor: not-allowed;' : ''}" />
       <small>${isNewInstance ? 'Auto-detected from current page. You can edit this if needed.' : 'Base URL of your n8n instance'}</small>
-    </div>
-    
-    <div class="n8n-github-settings-field">
-      <label for="n8n-api-key">n8n API Key *</label>
+        </div>
+        
+        <div class="n8n-github-settings-field">
+          <label for="n8n-api-key">n8n API Key *</label>
       <input type="password" id="n8n-api-key" placeholder="Your n8n API key" value="${escapeHtml(config.n8nApiKey || '')}" autocomplete="new-password" data-lpignore="true" />
-      <small>Found in n8n Settings > API</small>
-    </div>
-    
-    <div class="n8n-github-settings-field">
-      <label for="github-repo">GitHub Repository *</label>
-      <input type="text" id="github-repo" placeholder="owner/repo" value="${escapeHtml(config.githubRepo || '')}" autocomplete="off" data-lpignore="true" />
-      <small>Format: owner/repository-name</small>
-    </div>
-    
-    <div class="n8n-github-settings-field">
-      <label for="github-token">GitHub Personal Access Token *</label>
+          <small>Found in n8n Settings > API</small>
+        </div>
+        
+        <div class="n8n-github-settings-field">
+          <label for="github-repo">GitHub Repository *</label>
+      <div style="display: flex; gap: 8px; align-items: center;">
+        <input type="text" id="github-repo" placeholder="owner/repo" value="${escapeHtml(config.githubRepo || '')}" autocomplete="off" data-lpignore="true" style="flex: 1;" />
+        <button type="button" id="n8n-create-repo-btn" class="n8n-github-settings-save" style="flex: 0 0 auto; padding: 10px 16px; white-space: nowrap;">Create Repo</button>
+      </div>
+          <small>Format: owner/repository-name</small>
+        </div>
+        
+        <div class="n8n-github-settings-field">
+          <label for="github-token">GitHub Personal Access Token *</label>
       <input type="password" id="github-token" placeholder="ghp_xxxxxxxxxxxx" value="${escapeHtml(config.githubToken || '')}" autocomplete="new-password" data-lpignore="true" />
-      <small>Token with 'repo' scope. Create at: github.com/settings/tokens</small>
-    </div>
+          <small>Token with 'repo' scope. Create at: github.com/settings/tokens</small>
+        </div>
     
     <div class="n8n-github-settings-field">
-      <label for="github-path-pattern">GitHub Path Pattern</label>
-      <input type="text" id="github-path-pattern" placeholder="workflows/{workflow-name}.json" value="${escapeHtml(config.githubPathPattern || 'workflows/{workflow-name}.json')}" autocomplete="off" data-lpignore="true" />
-      <small>Use {workflow-name} and {workflow-id} as placeholders</small>
+      <label for="default-branch">Default Branch</label>
+      <div style="display: flex; gap: 8px; align-items: center;">
+        <select id="default-branch" style="flex: 1; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; background: white;">
+          <option value="">Loading branches...</option>
+        </select>
+        <button type="button" id="n8n-create-branch-btn" class="n8n-github-settings-save" style="flex: 0 0 auto; padding: 10px 16px; white-space: nowrap;">Create Branch</button>
+      </div>
+      <small>Branch to use for commits (default: main)</small>
     </div>
+        
+        <div class="n8n-github-settings-field">
+          <label for="github-path-pattern">GitHub Path Pattern</label>
+      <input type="text" id="github-path-pattern" placeholder="workflows/{workflow-name}.json" value="${escapeHtml(config.githubPathPattern || 'workflows/{workflow-name}.json')}" autocomplete="off" data-lpignore="true" />
+          <small>Use {workflow-name} and {workflow-id} as placeholders</small>
+        </div>
     
     <div class="n8n-github-settings-field">
       <label for="commit-message">Commit Message</label>
       <input type="text" id="commit-message" placeholder="Update workflow: {workflow-name}" value="${escapeHtml(config.commitMessage || 'Update workflow: {workflow-name}')}" autocomplete="off" data-lpignore="true" />
       <small>Use {workflow-name} and {workflow-id} as placeholders. Leave empty for default.</small>
     </div>
-    
-    <div class="n8n-github-settings-actions">
-      <button id="n8n-github-settings-save" class="n8n-github-settings-save">Save</button>
-      <button id="n8n-github-settings-cancel" class="n8n-github-settings-cancel">Cancel</button>
-    </div>
-    
-    <div id="n8n-github-settings-message" class="n8n-github-settings-message"></div>
+        
+        <div class="n8n-github-settings-actions">
+          <button id="n8n-github-settings-save" class="n8n-github-settings-save">Save</button>
+          <button id="n8n-github-settings-cancel" class="n8n-github-settings-cancel">Cancel</button>
+        </div>
+        
+        <div id="n8n-github-settings-message" class="n8n-github-settings-message"></div>
   `;
   
   // Event listeners
-  const backBtn = shadowRoot.getElementById('n8n-back-to-list-btn');
+  const backBtn = shadowRoot.getElementById('n8n-back-to-details-btn');
   const cancelBtn = shadowRoot.getElementById('n8n-github-settings-cancel');
   const saveBtn = shadowRoot.getElementById('n8n-github-settings-save');
   
   if (backBtn) {
     backBtn.addEventListener('click', () => {
-      showInstanceListView();
+      if (instanceId) {
+        showInstanceDetailsView(instanceId);
+      } else {
+        // If new instance, just clear the details panel
+        const detailsContent = shadowRoot.getElementById('n8n-details-content');
+        const detailsTitle = shadowRoot.getElementById('n8n-details-title');
+        if (detailsContent) {
+          detailsContent.innerHTML = '<div class="n8n-empty-state"><p>Select an instance to view details</p></div>';
+        }
+        if (detailsTitle) {
+          detailsTitle.textContent = 'Instance Details';
+        }
+      }
     });
   }
   
   if (cancelBtn) {
     cancelBtn.addEventListener('click', () => {
-      showInstanceListView();
+      if (instanceId) {
+        showInstanceDetailsView(instanceId);
+      } else {
+        // If new instance, just clear the details panel
+        const detailsContent = shadowRoot.getElementById('n8n-details-content');
+        const detailsTitle = shadowRoot.getElementById('n8n-details-title');
+        if (detailsContent) {
+          detailsContent.innerHTML = '<div class="n8n-empty-state"><p>Select an instance to view details</p></div>';
+        }
+        if (detailsTitle) {
+          detailsTitle.textContent = 'Instance Details';
+        }
+      }
     });
   }
   
@@ -1067,10 +1962,46 @@ async function showInstanceEditView(instanceId) {
     });
   }
   
+  // Load branches for branch selector
+  if (config.githubRepo && config.githubToken) {
+    loadBranchesForSelector(shadowRoot, config.githubRepo, config.githubToken, config.defaultBranch || 'main');
+  }
+  
+  // Repository creation button
+  const createRepoBtn = shadowRoot.getElementById('n8n-create-repo-btn');
+  if (createRepoBtn) {
+    createRepoBtn.addEventListener('click', () => {
+      showCreateRepoModal(shadowRoot);
+    });
+  }
+  
+  // Branch creation button
+  const createBranchBtn = shadowRoot.getElementById('n8n-create-branch-btn');
+  if (createBranchBtn) {
+    createBranchBtn.addEventListener('click', () => {
+      showCreateBranchModal(shadowRoot, config.githubRepo, config.githubToken);
+    });
+  }
+  
+  // Watch for repo/token changes to reload branches
+  const repoInput = shadowRoot.getElementById('github-repo');
+  const tokenInput = shadowRoot.getElementById('github-token');
+  if (repoInput && tokenInput) {
+    const reloadBranches = () => {
+      const repo = repoInput.value.trim();
+      const token = tokenInput.value.trim();
+      if (repo && token) {
+        loadBranchesForSelector(shadowRoot, repo, token);
+      }
+    };
+    repoInput.addEventListener('blur', reloadBranches);
+    tokenInput.addEventListener('blur', reloadBranches);
+  }
+  
   // Ensure all input fields are editable (prevent autofill from blocking)
   // But keep URL field readonly for new instances
   setTimeout(() => {
-    const inputs = body.querySelectorAll('input');
+    const inputs = detailsContent.querySelectorAll('input');
     const urlInput = shadowRoot.getElementById('n8n-url');
     
     inputs.forEach(input => {
@@ -1117,19 +2048,357 @@ async function showInstanceEditView(instanceId) {
 // Delete instance
 async function deleteInstance(instanceId) {
   try {
-    const response = await chrome.runtime.sendMessage({
+    const response = await sendMessageSafe({
       action: 'deleteInstance',
       instanceId: instanceId
     });
     
     if (response && response.success) {
-      showInstanceListView();
+      // Clear details panel
+      const shadowRoot = getSettingsPanelShadowRoot();
+      const detailsContent = shadowRoot.getElementById('n8n-details-content');
+      const detailsTitle = shadowRoot.getElementById('n8n-details-title');
+      if (detailsContent) {
+        detailsContent.innerHTML = '<div class="n8n-empty-state"><p>Select an instance to view details</p></div>';
+      }
+      if (detailsTitle) {
+        detailsTitle.textContent = 'Instance Details';
+      }
+      // Reload list
+      await showInstanceListView();
     } else {
       showSettingsMessage(`Error: ${response?.error || 'Failed to delete instance'}`, 'error');
     }
   } catch (error) {
     log('Error deleting instance:', error);
     showSettingsMessage(`Error: ${error.message}`, 'error');
+  }
+}
+
+// Load branches into selector
+async function loadBranchesForSelector(shadowRoot, githubRepo, githubToken, selectedBranch) {
+  const branchSelect = shadowRoot.getElementById('default-branch');
+  if (!branchSelect) return;
+  
+  branchSelect.innerHTML = '<option value="">Loading...</option>';
+  
+  try {
+    const [owner, repo] = githubRepo.split('/');
+    if (!owner || !repo) {
+      branchSelect.innerHTML = '<option value="main">main</option>';
+      return;
+    }
+    
+    const response = await sendMessageSafe({
+      action: 'listBranches',
+      owner: owner,
+      repo: repo,
+      githubToken: githubToken
+    });
+    
+    if (response && response.success && response.branches) {
+      branchSelect.innerHTML = '';
+      response.branches.forEach(branch => {
+        const option = document.createElement('option');
+        option.value = branch;
+        option.textContent = branch;
+        if (branch === selectedBranch) {
+          option.selected = true;
+        }
+        branchSelect.appendChild(option);
+      });
+      
+      // If no branch selected and we have a default, select it
+      if (!selectedBranch && response.branches.length > 0) {
+        const defaultBranch = response.branches.find(b => b === 'main') || response.branches.find(b => b === 'master') || response.branches[0];
+        branchSelect.value = defaultBranch;
+      }
+    } else {
+      // Fallback to main/master
+      branchSelect.innerHTML = '<option value="main">main</option><option value="master">master</option>';
+      if (selectedBranch) {
+        branchSelect.value = selectedBranch;
+      }
+    }
+  } catch (error) {
+    log('Error loading branches:', error);
+    branchSelect.innerHTML = '<option value="main">main</option><option value="master">master</option>';
+    if (selectedBranch) {
+      branchSelect.value = selectedBranch;
+    }
+  }
+}
+
+// Show create repository modal
+function showCreateRepoModal(shadowRoot) {
+  const modal = document.createElement('div');
+  modal.id = 'n8n-create-repo-modal';
+  modal.className = 'n8n-github-modal-overlay';
+  modal.innerHTML = `
+    <div class="n8n-github-modal">
+      <div class="n8n-github-modal-header">
+        <h3>Create New Repository</h3>
+        <button class="n8n-github-modal-close" id="n8n-create-repo-close">×</button>
+      </div>
+      <div class="n8n-github-modal-body">
+        <div class="n8n-github-settings-field">
+          <label for="repo-owner">Owner (username or org) *</label>
+          <input type="text" id="repo-owner" placeholder="username or org-name" />
+          <small>Your GitHub username or organization name</small>
+        </div>
+        <div class="n8n-github-settings-field">
+          <label for="repo-name">Repository Name *</label>
+          <input type="text" id="repo-name" placeholder="my-workflows" />
+          <small>Repository name (lowercase, no spaces)</small>
+        </div>
+        <div class="n8n-github-settings-field">
+          <label for="repo-description">Description</label>
+          <input type="text" id="repo-description" placeholder="n8n workflow backups" />
+        </div>
+        <div class="n8n-github-settings-field">
+          <label style="display: flex; align-items: center; gap: 8px;">
+            <input type="checkbox" id="repo-private" />
+            <span>Private repository</span>
+          </label>
+        </div>
+        <div class="n8n-github-settings-field">
+          <label style="display: flex; align-items: center; gap: 8px;">
+            <input type="checkbox" id="repo-readme" />
+            <span>Initialize with README</span>
+          </label>
+        </div>
+        <div class="n8n-github-settings-actions">
+          <button id="n8n-create-repo-submit" class="n8n-github-settings-save">Create Repository</button>
+          <button id="n8n-create-repo-cancel" class="n8n-github-settings-cancel">Cancel</button>
+        </div>
+        <div id="n8n-create-repo-message" class="n8n-github-settings-message"></div>
+      </div>
+    </div>
+  `;
+  
+  shadowRoot.appendChild(modal);
+  modal.style.display = 'flex';
+  
+  const closeBtn = shadowRoot.getElementById('n8n-create-repo-close');
+  const cancelBtn = shadowRoot.getElementById('n8n-create-repo-cancel');
+  const submitBtn = shadowRoot.getElementById('n8n-create-repo-submit');
+  
+  const closeModal = () => {
+    modal.style.display = 'none';
+    setTimeout(() => modal.remove(), 300);
+  };
+  
+  if (closeBtn) closeBtn.addEventListener('click', closeModal);
+  if (cancelBtn) cancelBtn.addEventListener('click', closeModal);
+  
+  if (submitBtn) {
+    submitBtn.addEventListener('click', async () => {
+      const owner = shadowRoot.getElementById('repo-owner')?.value.trim() || '';
+      const repoName = shadowRoot.getElementById('repo-name')?.value.trim() || '';
+      const description = shadowRoot.getElementById('repo-description')?.value.trim() || '';
+      const isPrivate = shadowRoot.getElementById('repo-private')?.checked || false;
+      const hasReadme = shadowRoot.getElementById('repo-readme')?.checked || false;
+      const githubToken = shadowRoot.getElementById('github-token')?.value.trim() || '';
+      
+      if (!owner || !repoName) {
+        showModalMessage(shadowRoot, 'n8n-create-repo-message', 'Owner and repository name are required', 'error');
+        return;
+      }
+      
+      if (!githubToken) {
+        showModalMessage(shadowRoot, 'n8n-create-repo-message', 'GitHub token is required', 'error');
+        return;
+      }
+      
+      try {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Creating...';
+        
+        const response = await sendMessageSafe({
+          action: 'createGitHubRepo',
+          owner: owner,
+          repoName: repoName,
+          description: description,
+          isPrivate: isPrivate,
+          hasReadme: hasReadme,
+          githubToken: githubToken
+        });
+        
+        if (response && response.success) {
+          // Auto-fill repository field
+          const repoInput = shadowRoot.getElementById('github-repo');
+          if (repoInput) {
+            repoInput.value = response.repoFullName;
+          }
+          
+          // Update default branch
+          const branchSelect = shadowRoot.getElementById('default-branch');
+          if (branchSelect && response.defaultBranch) {
+            // Reload branches
+            await loadBranchesForSelector(shadowRoot, response.repoFullName, githubToken, response.defaultBranch);
+          }
+          
+          showModalMessage(shadowRoot, 'n8n-create-repo-message', `Repository created! ${response.repoUrl}`, 'success');
+          setTimeout(() => {
+            closeModal();
+          }, 2000);
+        } else {
+          showModalMessage(shadowRoot, 'n8n-create-repo-message', `Error: ${response?.error || 'Failed to create repository'}`, 'error');
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Create Repository';
+        }
+      } catch (error) {
+        showModalMessage(shadowRoot, 'n8n-create-repo-message', `Error: ${error.message}`, 'error');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Create Repository';
+      }
+    });
+  }
+}
+
+// Show create branch modal
+function showCreateBranchModal(shadowRoot, githubRepo, githubToken) {
+  if (!githubRepo || !githubToken) {
+    showSettingsMessage('Please configure GitHub repository and token first', 'error');
+    return;
+  }
+  
+  const [owner, repo] = githubRepo.split('/');
+  if (!owner || !repo) {
+    showSettingsMessage('Invalid repository format', 'error');
+    return;
+  }
+  
+  const modal = document.createElement('div');
+  modal.id = 'n8n-create-branch-modal';
+  modal.className = 'n8n-github-modal-overlay';
+  modal.innerHTML = `
+    <div class="n8n-github-modal">
+      <div class="n8n-github-modal-header">
+        <h3>Create New Branch</h3>
+        <button class="n8n-github-modal-close" id="n8n-create-branch-close">×</button>
+      </div>
+      <div class="n8n-github-modal-body">
+        <div class="n8n-github-settings-field">
+          <label for="branch-name">Branch Name *</label>
+          <input type="text" id="branch-name" placeholder="feature/my-feature" />
+          <small>New branch name</small>
+        </div>
+        <div class="n8n-github-settings-field">
+          <label for="branch-from">Create from Branch *</label>
+          <select id="branch-from" style="width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px;">
+            <option value="">Loading...</option>
+          </select>
+          <small>Branch to create from</small>
+        </div>
+        <div class="n8n-github-settings-actions">
+          <button id="n8n-create-branch-submit" class="n8n-github-settings-save">Create Branch</button>
+          <button id="n8n-create-branch-cancel" class="n8n-github-settings-cancel">Cancel</button>
+        </div>
+        <div id="n8n-create-branch-message" class="n8n-github-settings-message"></div>
+      </div>
+    </div>
+  `;
+  
+  shadowRoot.appendChild(modal);
+  modal.style.display = 'flex';
+  
+  // Load branches for "create from" selector
+  loadBranchesForSelector(shadowRoot, githubRepo, githubToken).then(() => {
+    const fromSelect = shadowRoot.getElementById('branch-from');
+    const branchSelect = shadowRoot.getElementById('default-branch');
+    if (fromSelect && branchSelect) {
+      // Copy branches from default branch selector
+      Array.from(branchSelect.options).forEach(opt => {
+        const newOpt = opt.cloneNode(true);
+        fromSelect.appendChild(newOpt);
+      });
+      // Select current default branch
+      if (branchSelect.value) {
+        fromSelect.value = branchSelect.value;
+      }
+    }
+  });
+  
+  const closeBtn = shadowRoot.getElementById('n8n-create-branch-close');
+  const cancelBtn = shadowRoot.getElementById('n8n-create-branch-cancel');
+  const submitBtn = shadowRoot.getElementById('n8n-create-branch-submit');
+  
+  const closeModal = () => {
+    modal.style.display = 'none';
+    setTimeout(() => modal.remove(), 300);
+  };
+  
+  if (closeBtn) closeBtn.addEventListener('click', closeModal);
+  if (cancelBtn) cancelBtn.addEventListener('click', closeModal);
+  
+  if (submitBtn) {
+    submitBtn.addEventListener('click', async () => {
+      const branchName = shadowRoot.getElementById('branch-name')?.value.trim() || '';
+      const fromBranch = shadowRoot.getElementById('branch-from')?.value || '';
+      
+      if (!branchName) {
+        showModalMessage(shadowRoot, 'n8n-create-branch-message', 'Branch name is required', 'error');
+        return;
+      }
+      
+      if (!fromBranch) {
+        showModalMessage(shadowRoot, 'n8n-create-branch-message', 'Source branch is required', 'error');
+        return;
+      }
+      
+      try {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Creating...';
+        
+        const response = await sendMessageSafe({
+          action: 'createBranch',
+          owner: owner,
+          repo: repo,
+          branchName: branchName,
+          fromBranch: fromBranch,
+          githubToken: githubToken
+        });
+        
+        if (response && response.success) {
+          // Reload branches and select new branch
+          await loadBranchesForSelector(shadowRoot, githubRepo, githubToken, branchName);
+          const branchSelect = shadowRoot.getElementById('default-branch');
+          if (branchSelect) {
+            branchSelect.value = branchName;
+          }
+          
+          showModalMessage(shadowRoot, 'n8n-create-branch-message', 'Branch created successfully!', 'success');
+          setTimeout(() => {
+            closeModal();
+          }, 1500);
+        } else {
+          showModalMessage(shadowRoot, 'n8n-create-branch-message', `Error: ${response?.error || 'Failed to create branch'}`, 'error');
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Create Branch';
+        }
+      } catch (error) {
+        showModalMessage(shadowRoot, 'n8n-create-branch-message', `Error: ${error.message}`, 'error');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Create Branch';
+      }
+    });
+  }
+}
+
+// Show message in modal
+function showModalMessage(shadowRoot, messageId, message, type) {
+  const messageEl = shadowRoot.getElementById(messageId);
+  if (messageEl) {
+    messageEl.textContent = message;
+    messageEl.className = `n8n-github-settings-message ${type}`;
+    messageEl.style.display = 'block';
+    
+    if (type === 'success') {
+      setTimeout(() => {
+        messageEl.style.display = 'none';
+      }, 3000);
+    }
   }
 }
 
@@ -1142,6 +2411,7 @@ async function saveInstanceSettings() {
   const githubToken = shadowRoot.getElementById('github-token')?.value.trim() || '';
   const githubPathPattern = shadowRoot.getElementById('github-path-pattern')?.value.trim() || 'workflows/{workflow-name}.json';
   const commitMessage = shadowRoot.getElementById('commit-message')?.value.trim() || 'Update workflow: {workflow-name}';
+  const defaultBranch = shadowRoot.getElementById('default-branch')?.value || 'main';
   
   // Validation
   if (!n8nUrl) {
@@ -1166,25 +2436,26 @@ async function saveInstanceSettings() {
   
   try {
     const config = {
-      n8nUrl,
-      n8nApiKey,
-      githubRepo,
-      githubToken,
+        n8nUrl,
+        n8nApiKey,
+        githubRepo,
+        githubToken,
       githubPathPattern,
-      commitMessage
+      commitMessage,
+      defaultBranch
     };
     
     let response;
     if (currentEditingInstanceId) {
       // Update existing instance
-      response = await chrome.runtime.sendMessage({
+      response = await sendMessageSafe({
         action: 'updateInstance',
         instanceId: currentEditingInstanceId,
         config: config
       });
     } else {
       // Add new instance
-      response = await chrome.runtime.sendMessage({
+      response = await sendMessageSafe({
         action: 'addInstance',
         config: config
       });
@@ -1192,9 +2463,22 @@ async function saveInstanceSettings() {
     
     if (response && response.success) {
       showSettingsMessage('Settings saved successfully!', 'success');
-      setTimeout(() => {
-        showInstanceListView();
-      }, 1000);
+      // Reload the instance list
+      await showInstanceListView();
+      
+      // Show details view if editing existing instance, or select the new instance
+      const instanceIdToShow = currentEditingInstanceId || response.instanceId;
+      if (instanceIdToShow) {
+        // Re-select the instance in the list and show details
+        const shadowRoot = getSettingsPanelShadowRoot();
+        const container = shadowRoot.getElementById('n8n-instance-list-container');
+        const item = container?.querySelector(`[data-instance-id="${instanceIdToShow}"]`);
+        if (item) {
+          container.querySelectorAll('.n8n-instance-item').forEach(i => i.classList.remove('selected'));
+          item.classList.add('selected');
+          showInstanceDetailsView(instanceIdToShow);
+        }
+      }
     } else {
       showSettingsMessage(`Error: ${response?.error || 'Failed to save settings'}`, 'error');
     }
@@ -1232,10 +2516,252 @@ function toggleSettingsPanel() {
   }
 }
 
+// Show pull workflows modal
+async function showPullWorkflowsModal(shadowRoot, instances, currentInstanceUrl) {
+  if (instances.length === 0) {
+    showSettingsMessage('No instances configured', 'error');
+    return;
+  }
+  
+  // Find current instance or let user select
+  let selectedInstance = instances.find(inst => {
+    const normalizedUrl = normalizeInstanceUrl(inst.n8nUrl);
+    return normalizedUrl === normalizeInstanceUrl(currentInstanceUrl);
+  });
+  
+  if (!selectedInstance && instances.length === 1) {
+    selectedInstance = instances[0];
+  }
+  
+  const modal = document.createElement('div');
+  modal.id = 'n8n-pull-workflows-modal';
+  modal.className = 'n8n-github-modal-overlay';
+  
+  let instanceSelectorHtml = '';
+  if (instances.length > 1) {
+    instanceSelectorHtml = `
+      <div class="n8n-github-settings-field">
+        <label for="pull-instance-select">Select Instance</label>
+        <select id="pull-instance-select" style="width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px;">
+          ${instances.map(inst => `<option value="${inst.id}" ${inst === selectedInstance ? 'selected' : ''}>${inst.n8nUrl} - ${inst.githubRepo || 'No repo'}</option>`).join('')}
+        </select>
+      </div>
+    `;
+  }
+  
+  modal.innerHTML = `
+    <div class="n8n-github-modal" style="max-width: 700px;">
+      <div class="n8n-github-modal-header">
+        <h3>Pull Workflows from GitHub</h3>
+        <button class="n8n-github-modal-close" id="n8n-pull-workflows-close">×</button>
+      </div>
+      <div class="n8n-github-modal-body">
+        ${instanceSelectorHtml}
+        <div id="pull-workflows-list" style="max-height: 400px; overflow-y: auto; margin-top: 16px;">
+          <p style="text-align: center; color: #6b7280; padding: 20px;">Loading workflows...</p>
+        </div>
+        <div class="n8n-github-settings-actions" style="margin-top: 16px;">
+          <button id="n8n-pull-workflows-import" class="n8n-github-settings-save" disabled>Import Selected</button>
+          <button id="n8n-pull-workflows-cancel" class="n8n-github-settings-cancel">Cancel</button>
+        </div>
+        <div id="n8n-pull-workflows-message" class="n8n-github-settings-message"></div>
+      </div>
+    </div>
+  `;
+  
+  shadowRoot.appendChild(modal);
+  modal.style.display = 'flex';
+  
+  const closeBtn = shadowRoot.getElementById('n8n-pull-workflows-close');
+  const cancelBtn = shadowRoot.getElementById('n8n-pull-workflows-cancel');
+  const importBtn = shadowRoot.getElementById('n8n-pull-workflows-import');
+  const instanceSelect = shadowRoot.getElementById('pull-instance-select');
+  const workflowsList = shadowRoot.getElementById('pull-workflows-list');
+  
+  let currentInstance = selectedInstance;
+  let workflowFiles = [];
+  
+  const loadWorkflows = async (instance) => {
+    if (!instance || !instance.githubRepo || !instance.githubToken) {
+      workflowsList.innerHTML = '<p style="color: #ef4444; padding: 20px;">Instance not configured with GitHub repository</p>';
+      return;
+    }
+    
+    workflowsList.innerHTML = '<p style="text-align: center; color: #6b7280; padding: 20px;">Loading workflows...</p>';
+    
+    try {
+      const [owner, repo] = instance.githubRepo.split('/');
+      const response = await sendMessageSafe({
+        action: 'listWorkflowFiles',
+        owner: owner,
+        repo: repo,
+        pathPattern: instance.githubPathPattern || 'workflows/{workflow-name}.json',
+        branch: instance.defaultBranch || 'main',
+        githubToken: instance.githubToken
+      });
+      
+      if (response && response.success && response.files) {
+        workflowFiles = response.files;
+        
+        if (workflowFiles.length === 0) {
+          workflowsList.innerHTML = '<p style="text-align: center; color: #6b7280; padding: 20px;">No workflow files found in repository</p>';
+          return;
+        }
+        
+        let workflowsHtml = '<div class="n8n-workflow-list">';
+        workflowFiles.forEach((file, index) => {
+          const date = new Date(file.lastModified).toLocaleDateString();
+          workflowsHtml += `
+            <label class="n8n-workflow-item" data-index="${index}" style="display: flex; align-items: center; gap: 12px; padding: 12px; border: 2px solid #e5e7eb; border-radius: 6px; background: #f9fafb; cursor: pointer; transition: all 0.2s ease;">
+              <input type="checkbox" id="workflow-${index}" data-index="${index}" style="width: 20px; height: 20px; cursor: pointer; flex-shrink: 0; accent-color: #6366f1;" />
+              <div style="flex: 1; min-width: 0;">
+                <div style="font-weight: 600; color: #1f2937; margin-bottom: 4px;">${escapeHtml(file.name)}</div>
+                <div style="font-size: 12px; color: #6b7280;">${escapeHtml(file.path)} • ${date}</div>
+              </div>
+            </label>
+          `;
+        });
+        workflowsHtml += '</div>';
+        workflowsList.innerHTML = workflowsHtml;
+        
+        // Add checkbox change listeners and make entire row clickable
+        workflowFiles.forEach((file, index) => {
+          const checkbox = shadowRoot.getElementById(`workflow-${index}`);
+          const label = shadowRoot.querySelector(`label[data-index="${index}"]`);
+          
+          if (checkbox && label) {
+            // Toggle checkbox when label is clicked
+            label.addEventListener('click', (e) => {
+              // Don't toggle twice if clicking directly on checkbox
+              if (e.target !== checkbox) {
+                checkbox.checked = !checkbox.checked;
+                checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+            });
+            
+            // Update button state and visual feedback
+            checkbox.addEventListener('change', () => {
+              const checked = shadowRoot.querySelectorAll('#pull-workflows-list input[type="checkbox"]:checked').length;
+              importBtn.disabled = checked === 0;
+              
+              // Update visual feedback
+              if (checkbox.checked) {
+                label.style.borderColor = '#6366f1';
+                label.style.background = '#eef2ff';
+              } else {
+                label.style.borderColor = '#e5e7eb';
+                label.style.background = '#f9fafb';
+              }
+            });
+          }
+        });
+      } else {
+        workflowsList.innerHTML = `<p style="color: #ef4444; padding: 20px;">Error: ${response?.error || 'Failed to load workflows'}</p>`;
+      }
+    } catch (error) {
+      workflowsList.innerHTML = `<p style="color: #ef4444; padding: 20px;">Error: ${error.message}</p>`;
+    }
+  };
+  
+  // Load workflows for selected instance
+  if (currentInstance) {
+    await loadWorkflows(currentInstance);
+  }
+  
+  // Handle instance selection change
+  if (instanceSelect) {
+    instanceSelect.addEventListener('change', async (e) => {
+      const instanceId = e.target.value;
+      currentInstance = instances.find(inst => inst.id === instanceId);
+      await loadWorkflows(currentInstance);
+    });
+  }
+  
+  const closeModal = () => {
+    modal.style.display = 'none';
+    setTimeout(() => modal.remove(), 300);
+  };
+  
+  if (closeBtn) closeBtn.addEventListener('click', closeModal);
+  if (cancelBtn) cancelBtn.addEventListener('click', closeModal);
+  
+  if (importBtn) {
+    importBtn.addEventListener('click', async () => {
+      const checked = Array.from(shadowRoot.querySelectorAll('#pull-workflows-list input[type="checkbox"]:checked'));
+      if (checked.length === 0) {
+        showModalMessage(shadowRoot, 'n8n-pull-workflows-message', 'Please select at least one workflow', 'error');
+        return;
+      }
+      
+      if (!currentInstance) {
+        showModalMessage(shadowRoot, 'n8n-pull-workflows-message', 'Please select an instance', 'error');
+        return;
+      }
+      
+      importBtn.disabled = true;
+      importBtn.textContent = 'Importing...';
+      
+      let successCount = 0;
+      let errorCount = 0;
+      
+      for (const checkbox of checked) {
+        const index = parseInt(checkbox.getAttribute('data-index'));
+        const file = workflowFiles[index];
+        
+        try {
+          // Pull workflow file
+          const pullResponse = await sendMessageSafe({
+            action: 'pullWorkflowFromGitHub',
+            instanceUrl: currentInstance.n8nUrl,
+            filePath: file.path,
+            branch: currentInstance.defaultBranch || 'main'
+          });
+          
+          if (pullResponse && pullResponse.success) {
+            // Import to n8n
+            const importResponse = await sendMessageSafe({
+              action: 'importWorkflowToN8n',
+              instanceUrl: currentInstance.n8nUrl,
+              workflowData: pullResponse.content.content,
+              workflowName: pullResponse.content.name
+            });
+            
+            if (importResponse && importResponse.success) {
+              successCount++;
+            } else {
+              errorCount++;
+              log('Failed to import workflow:', file.name, importResponse?.error);
+            }
+          } else {
+            errorCount++;
+            log('Failed to pull workflow:', file.name, pullResponse?.error);
+          }
+        } catch (error) {
+          errorCount++;
+          log('Error importing workflow:', file.name, error);
+        }
+      }
+      
+      if (successCount > 0) {
+        showModalMessage(shadowRoot, 'n8n-pull-workflows-message', `Successfully imported ${successCount} workflow(s)${errorCount > 0 ? `. ${errorCount} failed.` : ''}`, 'success');
+        setTimeout(() => {
+          closeModal();
+          // Reload page to show imported workflows
+          window.location.reload();
+        }, 2000);
+      } else {
+        showModalMessage(shadowRoot, 'n8n-pull-workflows-message', `Failed to import workflows. ${errorCount} error(s).`, 'error');
+        importBtn.disabled = false;
+        importBtn.textContent = 'Import Selected';
+      }
+    });
+  }
+}
+
 // Show message in settings panel
-function showSettingsMessage(message, type) {
+function showSettingsMessage(message, type, element = null) {
   const shadowRoot = getSettingsPanelShadowRoot();
-  const messageEl = shadowRoot.getElementById('n8n-github-settings-message');
+  const messageEl = element || shadowRoot.getElementById('n8n-github-settings-message') || shadowRoot.getElementById('n8n-detail-message');
   if (messageEl) {
     messageEl.textContent = message;
     messageEl.className = `n8n-github-settings-message ${type}`;
@@ -1281,6 +2807,30 @@ async function showCommitMessagePrompt(config) {
     .replace('{workflow-name}', workflowName)
     .replace('{workflow-id}', workflowId || '');
   
+  // Get default branch
+  const defaultBranch = config?.defaultBranch || 'main';
+  
+  // Load branches if repo and token are configured
+  let branches = [defaultBranch];
+  if (config?.githubRepo && config?.githubToken) {
+    try {
+      const [owner, repo] = config.githubRepo.split('/');
+      if (owner && repo) {
+        const branchResponse = await sendMessageSafe({
+          action: 'listBranches',
+          owner: owner,
+          repo: repo,
+          githubToken: config.githubToken
+        });
+        if (branchResponse && branchResponse.success && branchResponse.branches) {
+          branches = branchResponse.branches;
+        }
+      }
+    } catch (error) {
+      log('Error loading branches:', error);
+    }
+  }
+  
   return new Promise((resolve) => {
     // Remove existing prompt if any
     const existing = document.getElementById('n8n-github-commit-prompt');
@@ -1292,6 +2842,8 @@ async function showCommitMessagePrompt(config) {
     prompt.id = 'n8n-github-commit-prompt';
     prompt.className = 'n8n-github-commit-prompt';
     
+    const branchOptions = branches.map(b => `<option value="${b}" ${b === defaultBranch ? 'selected' : ''}>${b}</option>`).join('');
+    
     prompt.innerHTML = `
       <div class="n8n-github-commit-content">
         <div class="n8n-github-commit-header">
@@ -1299,6 +2851,24 @@ async function showCommitMessagePrompt(config) {
           <button class="n8n-github-commit-close" id="n8n-github-commit-close">×</button>
         </div>
         <div class="n8n-github-commit-body">
+          <div class="n8n-github-commit-field">
+            <label for="commit-branch-select">Branch</label>
+            <div style="display: flex; gap: 8px; align-items: flex-end;">
+              <select id="commit-branch-select" style="flex: 1; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px;">
+                ${branchOptions}
+              </select>
+              <button type="button" id="commit-create-branch-btn" class="n8n-github-settings-save" style="flex: 0 0 auto; padding: 10px 16px; white-space: nowrap;">New Branch</button>
+            </div>
+            <div id="commit-branch-input-container" style="display: none; margin-top: 8px;">
+              <div style="display: flex; gap: 8px;">
+                <input type="text" id="commit-new-branch-name" placeholder="Enter branch name" style="flex: 1; padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px;" />
+                <button type="button" id="commit-confirm-branch-btn" class="n8n-github-settings-save" style="padding: 8px 16px;">Create</button>
+                <button type="button" id="commit-cancel-branch-btn" class="n8n-github-settings-cancel" style="padding: 8px 16px;">Cancel</button>
+              </div>
+              <small id="commit-branch-error" style="color: #ef4444; display: none;"></small>
+            </div>
+            <small>Select branch to commit to</small>
+          </div>
           <div class="n8n-github-commit-field">
             <label for="commit-message-input">Enter commit message (or use default):</label>
             <textarea id="commit-message-input" rows="3" placeholder="${defaultMessage}">${defaultMessage}</textarea>
@@ -1329,6 +2899,117 @@ async function showCommitMessagePrompt(config) {
     const cancelBtn = document.getElementById('n8n-github-commit-cancel');
     const pushBtn = document.getElementById('n8n-github-commit-push');
     const textarea = document.getElementById('commit-message-input');
+    const branchSelect = document.getElementById('commit-branch-select');
+    const createBranchBtn = document.getElementById('commit-create-branch-btn');
+    
+    // Handle create branch button
+    const branchInputContainer = document.getElementById('commit-branch-input-container');
+    const branchNameInput = document.getElementById('commit-new-branch-name');
+    const confirmBranchBtn = document.getElementById('commit-confirm-branch-btn');
+    const cancelBranchBtn = document.getElementById('commit-cancel-branch-btn');
+    const branchErrorMsg = document.getElementById('commit-branch-error');
+    
+    if (createBranchBtn && config?.githubRepo && config?.githubToken) {
+      // Show input field when "New Branch" is clicked
+      createBranchBtn.addEventListener('click', () => {
+        branchInputContainer.style.display = 'block';
+        branchNameInput.focus();
+        createBranchBtn.style.display = 'none';
+      });
+      
+      // Cancel branch creation
+      if (cancelBranchBtn) {
+        cancelBranchBtn.addEventListener('click', () => {
+          branchInputContainer.style.display = 'none';
+          branchNameInput.value = '';
+          branchErrorMsg.style.display = 'none';
+          createBranchBtn.style.display = 'block';
+        });
+      }
+      
+      // Confirm branch creation
+      if (confirmBranchBtn) {
+        confirmBranchBtn.addEventListener('click', async () => {
+          const newBranchName = branchNameInput.value.trim();
+          
+          // Validate branch name
+          if (!newBranchName) {
+            branchErrorMsg.textContent = 'Branch name is required';
+            branchErrorMsg.style.display = 'block';
+            return;
+          }
+          
+          // Basic validation
+          if (newBranchName.includes('..') || newBranchName.startsWith('.') || newBranchName.endsWith('.')) {
+            branchErrorMsg.textContent = 'Invalid branch name format';
+            branchErrorMsg.style.display = 'block';
+            return;
+          }
+          
+          branchErrorMsg.style.display = 'none';
+          const fromBranch = branchSelect.value || defaultBranch;
+          const [owner, repo] = config.githubRepo.split('/');
+          
+          if (!owner || !repo) {
+            branchErrorMsg.textContent = 'Invalid repository format';
+            branchErrorMsg.style.display = 'block';
+            return;
+          }
+          
+          try {
+            confirmBranchBtn.disabled = true;
+            confirmBranchBtn.textContent = 'Creating...';
+            
+            const response = await sendMessageSafe({
+              action: 'createBranch',
+              owner: owner,
+              repo: repo,
+              branchName: newBranchName,
+              fromBranch: fromBranch,
+              githubToken: config.githubToken
+            });
+            
+            if (response && response.success) {
+              // Add new branch to selector and select it
+              const option = document.createElement('option');
+              option.value = newBranchName;
+              option.textContent = newBranchName;
+              option.selected = true;
+              branchSelect.appendChild(option);
+              branchSelect.value = newBranchName;
+              
+              // Hide input field
+              branchInputContainer.style.display = 'none';
+              branchNameInput.value = '';
+              createBranchBtn.style.display = 'block';
+              
+              // Show success notification
+              showNotification('Branch created successfully!', 'success');
+            } else {
+              const errorMsg = response?.error || 'Failed to create branch';
+              branchErrorMsg.textContent = errorMsg;
+              branchErrorMsg.style.display = 'block';
+            }
+          } catch (error) {
+            const errorMsg = error.message || 'Unknown error';
+            branchErrorMsg.textContent = errorMsg;
+            branchErrorMsg.style.display = 'block';
+          } finally {
+            confirmBranchBtn.disabled = false;
+            confirmBranchBtn.textContent = 'Create';
+          }
+        });
+        
+        // Allow Enter key to submit
+        if (branchNameInput) {
+          branchNameInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+              confirmBranchBtn.click();
+            }
+          });
+        }
+      }
+    }
     
     const cleanup = () => {
       prompt.style.display = 'none';
@@ -1337,8 +3018,9 @@ async function showCommitMessagePrompt(config) {
     
     const handlePush = () => {
       const message = textarea?.value.trim() || defaultMessage;
+      const branch = branchSelect?.value || defaultBranch;
       cleanup();
-      resolve(message);
+      resolve({ message, branch });
     };
     
     const handleCancel = () => {
@@ -1406,9 +3088,17 @@ function init() {
   log('Initializing extension...');
   log('Document ready state:', document.readyState);
   log('Current URL:', window.location.href);
+  log('Is n8n page?', isN8nPage());
+  
+  // Only initialize if we're on an n8n page
+  if (!isN8nPage()) {
+    log('Not an n8n page, skipping initialization');
+    return;
+  }
+  
   log('Is workflow page?', isWorkflowPage());
   
-  // Always inject settings panel and button
+  // Always inject settings panel and button on n8n pages
   injectSettingsPanel();
   injectSettingsButton();
   
@@ -1435,14 +3125,20 @@ if (document.readyState === 'loading') {
 // Also try after a short delay (for SPAs)
 setTimeout(() => {
   log('Delayed initialization check');
+  if (!isN8nPage()) {
+    log('Not an n8n page on delayed check, skipping');
+    return;
+  }
+  
+  if (!settingsPanelInjected) {
+    log('Settings panel not injected yet, retrying...');
+    injectSettingsPanel();
+    injectSettingsButton();
+  }
+  
   if (!buttonInjected && isWorkflowPage()) {
     log('Button not injected yet, retrying...');
     injectPushButton();
-  }
-  if (!settingsPanelInjected) {
-    log('Settings not injected yet, retrying...');
-    injectSettingsPanel();
-    injectSettingsButton();
   }
 }, 2000);
 
