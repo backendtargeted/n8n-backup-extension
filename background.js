@@ -662,6 +662,27 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
   
+  if (request.action === 'getGitHistory') {
+    fetchGitHistory(request.owner, request.repo, request.branch, request.githubToken, request.vpsUrl)
+      .then(commits => sendResponse({ success: true, commits }))
+      .catch(error => sendResponse({ success: false, error: sanitizeError(error, DEBUG) }));
+    return true;
+  }
+  
+  if (request.action === 'getCommitGraph') {
+    fetchCommitGraph(request.owner, request.repo, request.branch, request.githubToken, request.vpsUrl)
+      .then(graph => sendResponse({ success: true, graph }))
+      .catch(error => sendResponse({ success: false, error: sanitizeError(error, DEBUG) }));
+    return true;
+  }
+  
+  if (request.action === 'getBranches') {
+    fetchBranches(request.owner, request.repo, request.githubToken, request.vpsUrl)
+      .then(branches => sendResponse({ success: true, branches }))
+      .catch(error => sendResponse({ success: false, error: sanitizeError(error, DEBUG) }));
+    return true;
+  }
+  
   if (request.action === 'requestInstancePermission') {
     requestInstancePermission(request.n8nUrl)
       .then(granted => sendResponse({ success: true, granted }))
@@ -784,7 +805,8 @@ async function getConfig(instanceUrl) {
       githubToken: decryptedGithubToken || '',
       githubPathPattern: matchingInstance.githubPathPattern || 'workflows/{workflow-name}.json',
       commitMessage: matchingInstance.commitMessage || 'Update workflow: {workflow-name}',
-      defaultBranch: matchingInstance.defaultBranch || 'main'
+      defaultBranch: matchingInstance.defaultBranch || 'main',
+      vpsUrl: matchingInstance.vpsUrl || ''
     };
   }
   
@@ -976,6 +998,7 @@ async function addInstance(config) {
     githubPathPattern: config.githubPathPattern || 'workflows/{workflow-name}.json',
     commitMessage: config.commitMessage || 'Update workflow: {workflow-name}',
     defaultBranch: config.defaultBranch || 'main',
+    vpsUrl: config.vpsUrl || '',
     lastUsed: null // Will be set when instance is first used
   };
   
@@ -1030,7 +1053,8 @@ async function updateInstance(instanceId, config) {
     githubRepo: config.githubRepo !== undefined ? config.githubRepo : instances[index].githubRepo,
     githubPathPattern: config.githubPathPattern !== undefined ? config.githubPathPattern : instances[index].githubPathPattern,
     commitMessage: config.commitMessage !== undefined ? config.commitMessage : instances[index].commitMessage,
-    defaultBranch: config.defaultBranch !== undefined ? config.defaultBranch : (instances[index].defaultBranch || 'main')
+    defaultBranch: config.defaultBranch !== undefined ? config.defaultBranch : (instances[index].defaultBranch || 'main'),
+    vpsUrl: config.vpsUrl !== undefined ? config.vpsUrl : (instances[index].vpsUrl || '')
   };
   
   // Encrypt credentials if provided (only if they have a value)
@@ -1911,5 +1935,194 @@ async function importWorkflowToN8n(instanceUrl, workflowData, workflowName, work
       workflowName: created.name
     };
   }
+}
+
+// ============================================================================
+// VPS GIT API CLIENT FUNCTIONS
+// ============================================================================
+
+// Fetch Git commit history
+async function fetchGitHistory(owner, repo, branch, githubToken, vpsUrl) {
+  const repoFull = `${owner}/${repo}`;
+  
+  // Validate inputs
+  validateGitHubRepo(repoFull);
+  if (branch) {
+    validateBranchName(branch);
+  }
+  if (githubToken) {
+    validateGitHubTokenFormat(githubToken);
+  }
+  
+  // Try VPS backend first if URL provided
+  if (vpsUrl && vpsUrl.trim()) {
+    try {
+      const vpsUrlClean = vpsUrl.trim().replace(/\/+$/, '');
+      const url = `${vpsUrlClean}/api/commits?repo=${encodeURIComponent(repoFull)}&branch=${encodeURIComponent(branch || 'main')}&limit=50`;
+      
+      const response = await fetch(url, {
+        headers: {
+          'x-github-token': githubToken,
+          'Accept': 'application/json'
+        }
+      });
+      
+      if (response.ok) {
+        const commits = await response.json();
+        return commits;
+      } else {
+        console.log('VPS backend failed, falling back to GitHub API');
+      }
+    } catch (error) {
+      console.log('VPS backend error, falling back to GitHub API:', error.message);
+    }
+  }
+  
+  // Fallback to direct GitHub API
+  const url = `https://api.github.com/repos/${owner}/${repo}/commits?sha=${encodeURIComponent(branch || 'main')}&per_page=50`;
+  
+  const response = await fetch(url, {
+    headers: {
+      'Authorization': `token ${githubToken}`,
+      'Accept': 'application/vnd.github.v3+json'
+    }
+  });
+  
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to fetch commits: ${response.status} ${errorText}`);
+  }
+  
+  const commits = await response.json();
+  
+  return commits.map(commit => ({
+    sha: commit.sha,
+    message: commit.commit.message.split('\n')[0],
+    author: {
+      name: commit.commit.author.name,
+      email: commit.commit.author.email
+    },
+    date: commit.commit.author.date,
+    branch: branch || 'main'
+  }));
+}
+
+// Fetch commit graph data
+async function fetchCommitGraph(owner, repo, branch, githubToken, vpsUrl) {
+  const repoFull = `${owner}/${repo}`;
+  
+  validateGitHubRepo(repoFull);
+  if (branch) {
+    validateBranchName(branch);
+  }
+  if (githubToken) {
+    validateGitHubTokenFormat(githubToken);
+  }
+  
+  // Try VPS backend first if URL provided
+  if (vpsUrl && vpsUrl.trim()) {
+    try {
+      const vpsUrlClean = vpsUrl.trim().replace(/\/+$/, '');
+      const url = `${vpsUrlClean}/api/commit-graph?repo=${encodeURIComponent(repoFull)}&branch=${encodeURIComponent(branch || 'main')}`;
+      
+      const response = await fetch(url, {
+        headers: {
+          'x-github-token': githubToken,
+          'Accept': 'application/json'
+        }
+      });
+      
+      if (response.ok) {
+        const graph = await response.json();
+        return graph;
+      }
+    } catch (error) {
+      console.log('VPS backend error, falling back to GitHub API:', error.message);
+    }
+  }
+  
+  // Fallback: return simplified graph from commits
+  const commits = await fetchGitHistory(owner, repo, branch, githubToken, null);
+  
+  return {
+    commits: commits,
+    branches: [branch || 'main'],
+    branchCommits: {}
+  };
+}
+
+// Fetch branches
+async function fetchBranches(owner, repo, githubToken, vpsUrl) {
+  const repoFull = `${owner}/${repo}`;
+  
+  validateGitHubRepo(repoFull);
+  if (githubToken) {
+    validateGitHubTokenFormat(githubToken);
+  }
+  
+  // Try VPS backend first if URL provided
+  if (vpsUrl && vpsUrl.trim()) {
+    try {
+      const vpsUrlClean = vpsUrl.trim().replace(/\/+$/, '');
+      const url = `${vpsUrlClean}/api/branches?repo=${encodeURIComponent(repoFull)}`;
+      
+      const response = await fetch(url, {
+        headers: {
+          'x-github-token': githubToken,
+          'Accept': 'application/json'
+        }
+      });
+      
+      if (response.ok) {
+        const branches = await response.json();
+        return branches;
+      }
+    } catch (error) {
+      console.log('VPS backend error, falling back to GitHub API:', error.message);
+    }
+  }
+  
+  // Fallback to direct GitHub API
+  const url = `https://api.github.com/repos/${owner}/${repo}/branches`;
+  
+  const response = await fetch(url, {
+    headers: {
+      'Authorization': `token ${githubToken}`,
+      'Accept': 'application/vnd.github.v3+json'
+    }
+  });
+  
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to fetch branches: ${response.status} ${errorText}`);
+  }
+  
+  const branches = await response.json();
+  
+  // Get default branch
+  const repoUrl = `https://api.github.com/repos/${owner}/${repo}`;
+  const repoResponse = await fetch(repoUrl, {
+    headers: {
+      'Authorization': `token ${githubToken}`,
+      'Accept': 'application/vnd.github.v3+json'
+    }
+  });
+  
+  let defaultBranch = 'main';
+  if (repoResponse.ok) {
+    const repoInfo = await repoResponse.json();
+    defaultBranch = repoInfo.default_branch || 'main';
+  }
+  
+  return branches.map(branch => ({
+    name: branch.name,
+    type: 'remote',
+    current: branch.name === defaultBranch,
+    lastCommit: {
+      sha: branch.commit.sha,
+      message: branch.commit.commit?.message?.split('\n')[0] || '',
+      date: branch.commit.commit?.author?.date || ''
+    }
+  }));
 }
 

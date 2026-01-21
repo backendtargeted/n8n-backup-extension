@@ -84,6 +84,9 @@ async function sendMessageSafe(request) {
 let buttonInjected = false;
 let settingsPanelInjected = false;
 let settingsVisible = false;
+let gitPanelInjected = false;
+let gitPanelVisible = false;
+let gitPanelShadowRoot = null;
 
 // Check if we're on a workflow page
 let lastWorkflowCheck = null;
@@ -501,6 +504,21 @@ function createSettingsButton() {
   btn.addEventListener('click', () => {
     log('Settings button clicked');
     toggleSettingsPanel();
+  });
+  
+  return btn;
+}
+
+function createGitButton() {
+  const btn = document.createElement('button');
+  btn.id = 'n8n-github-git-btn';
+  btn.className = 'n8n-github-git-btn';
+  btn.innerHTML = '📊 Git History';
+  btn.title = 'View Git commit history';
+  
+  btn.addEventListener('click', () => {
+    log('Git button clicked');
+    toggleGitPanel();
   });
   
   return btn;
@@ -1981,6 +1999,12 @@ async function showInstanceEditView(instanceId) {
       <input type="text" id="commit-message" placeholder="Update workflow: {workflow-name}" value="${escapeHtml(config.commitMessage || 'Update workflow: {workflow-name}')}" autocomplete="off" data-lpignore="true" />
       <small>Use {workflow-name} and {workflow-id} as placeholders. Leave empty for default.</small>
     </div>
+    
+    <div class="n8n-github-settings-field">
+      <label for="vps-url">VPS Backend URL (Optional)</label>
+      <input type="text" id="vps-url" placeholder="https://your-vps.com/git-api" value="${escapeHtml(config.vpsUrl || '')}" autocomplete="off" data-lpignore="true" />
+      <small>Optional: VPS backend URL for faster Git operations. Leave empty to use GitHub API directly.</small>
+    </div>
         
         <div class="n8n-github-settings-actions">
           <button id="n8n-github-settings-save" class="n8n-github-settings-save">Save</button>
@@ -2483,6 +2507,7 @@ async function saveInstanceSettings() {
   const githubPathPattern = shadowRoot.getElementById('github-path-pattern')?.value.trim() || 'workflows/{workflow-name}.json';
   const commitMessage = shadowRoot.getElementById('commit-message')?.value.trim() || 'Update workflow: {workflow-name}';
   const defaultBranch = shadowRoot.getElementById('default-branch')?.value || 'main';
+  const vpsUrl = shadowRoot.getElementById('vps-url')?.value.trim() || '';
   
   // Validation
   if (!n8nUrl) {
@@ -2513,7 +2538,8 @@ async function saveInstanceSettings() {
         githubToken,
       githubPathPattern,
       commitMessage,
-      defaultBranch
+      defaultBranch,
+      vpsUrl
     };
     
     let response;
@@ -3734,6 +3760,8 @@ function init() {
   // Always inject settings panel and button on n8n pages
   injectSettingsPanel();
   injectSettingsButton();
+  injectGitPanel();
+  injectGitButton();
   
   // Inject push button only on workflow pages
   if (isWorkflowPage()) {
@@ -3767,6 +3795,11 @@ setTimeout(() => {
     log('Settings panel not injected yet, retrying...');
     injectSettingsPanel();
     injectSettingsButton();
+  }
+  
+  if (!gitPanelInjected) {
+    injectGitPanel();
+    injectGitButton();
   }
   
   if (!buttonInjected && isWorkflowPage()) {
@@ -3839,5 +3872,402 @@ observer.observe(document.body, {
   childList: true,
   subtree: true
 });
+
+// ============================================================================
+// GIT PANEL FUNCTIONALITY
+// ============================================================================
+
+// Get or create Git panel shadow root
+function getGitPanelShadowRoot() {
+  if (gitPanelShadowRoot) {
+    return gitPanelShadowRoot;
+  }
+  
+  let host = document.getElementById('n8n-github-git-panel-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'n8n-github-git-panel-host';
+    host.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 9999; pointer-events: none;';
+    document.body.appendChild(host);
+  }
+  
+  if (!host.shadowRoot) {
+    gitPanelShadowRoot = host.attachShadow({ mode: 'open' });
+    log('Shadow root created for Git panel');
+  } else {
+    gitPanelShadowRoot = host.shadowRoot;
+  }
+  
+  return gitPanelShadowRoot;
+}
+
+// Inject Git panel styles
+function injectGitPanelStyles(shadowRoot) {
+  if (shadowRoot.querySelector('style#n8n-git-panel-styles')) {
+    return;
+  }
+  
+  const style = document.createElement('style');
+  style.id = 'n8n-git-panel-styles';
+  style.textContent = `
+    .n8n-git-panel {
+      position: fixed;
+      top: 0;
+      right: 0;
+      width: 400px;
+      height: 100vh;
+      background: white;
+      box-shadow: -2px 0 10px rgba(0, 0, 0, 0.1);
+      z-index: 10001;
+      display: flex;
+      flex-direction: column;
+      transform: translateX(100%);
+      transition: transform 0.3s ease;
+    }
+    .n8n-git-panel.visible {
+      transform: translateX(0);
+    }
+    .n8n-git-panel-header {
+      padding: 16px;
+      border-bottom: 1px solid #e5e7eb;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .n8n-git-panel-header h3 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 600;
+    }
+    .n8n-git-panel-close {
+      background: none;
+      border: none;
+      font-size: 24px;
+      cursor: pointer;
+      color: #6b7280;
+      padding: 4px;
+    }
+    .n8n-git-panel-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+    }
+    .n8n-git-branch-selector {
+      margin-bottom: 16px;
+    }
+    .n8n-git-branch-selector select {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+    }
+    .n8n-git-timeline {
+      position: relative;
+      padding-left: 30px;
+    }
+    .n8n-git-commit {
+      position: relative;
+      padding-bottom: 20px;
+      padding-left: 20px;
+    }
+    .n8n-git-commit::before {
+      content: '';
+      position: absolute;
+      left: -10px;
+      top: 8px;
+      width: 2px;
+      height: calc(100% - 8px);
+      background: #e5e7eb;
+    }
+    .n8n-git-commit:last-child::before {
+      display: none;
+    }
+    .n8n-git-commit-dot {
+      position: absolute;
+      left: -15px;
+      top: 4px;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #6366f1;
+      border: 2px solid white;
+      box-shadow: 0 0 0 2px #e5e7eb;
+    }
+    .n8n-git-commit-message {
+      font-weight: 500;
+      margin-bottom: 4px;
+      color: #1f2937;
+    }
+    .n8n-git-commit-meta {
+      font-size: 12px;
+      color: #6b7280;
+    }
+    .n8n-git-loading {
+      text-align: center;
+      padding: 40px;
+      color: #6b7280;
+    }
+    .n8n-git-error {
+      padding: 16px;
+      background: #fee2e2;
+      color: #991b1b;
+      border-radius: 6px;
+      margin-bottom: 16px;
+    }
+    @media (prefers-color-scheme: dark) {
+      .n8n-git-panel {
+        background: #1f2937;
+        color: #f9fafb;
+      }
+      .n8n-git-panel-header {
+        border-bottom-color: #374151;
+      }
+      .n8n-git-commit-message {
+        color: #f9fafb;
+      }
+      .n8n-git-commit-meta {
+        color: #9ca3af;
+      }
+      .n8n-git-branch-selector select {
+        background: #111827;
+        border-color: #374151;
+        color: #f9fafb;
+      }
+    }
+  `;
+  shadowRoot.appendChild(style);
+}
+
+// Inject Git panel
+function injectGitPanel() {
+  const shadowRoot = getGitPanelShadowRoot();
+  
+  if (shadowRoot.getElementById('n8n-git-panel')) {
+    log('Git panel already exists');
+    return;
+  }
+  
+  log('Injecting Git panel...');
+  
+  injectGitPanelStyles(shadowRoot);
+  
+  const panel = document.createElement('div');
+  panel.id = 'n8n-git-panel';
+  panel.className = 'n8n-git-panel';
+  
+  panel.innerHTML = `
+    <div class="n8n-git-panel-header">
+      <h3>Git History</h3>
+      <button class="n8n-git-panel-close" id="n8n-git-panel-close">×</button>
+    </div>
+    <div class="n8n-git-panel-body">
+      <div class="n8n-git-branch-selector">
+        <select id="n8n-git-branch-select">
+          <option value="">Loading branches...</option>
+        </select>
+      </div>
+      <div id="n8n-git-timeline-container">
+        <div class="n8n-git-loading">Loading commit history...</div>
+      </div>
+    </div>
+  `;
+  
+  shadowRoot.appendChild(panel);
+  
+  // Close button handler
+  const closeBtn = shadowRoot.getElementById('n8n-git-panel-close');
+  if (closeBtn) {
+    closeBtn.addEventListener('click', () => {
+      toggleGitPanel();
+    });
+  }
+  
+  // Branch selector handler
+  const branchSelect = shadowRoot.getElementById('n8n-git-branch-select');
+  if (branchSelect) {
+    branchSelect.addEventListener('change', async (e) => {
+      await loadGitHistory(e.target.value);
+    });
+  }
+  
+  gitPanelInjected = true;
+}
+
+// Toggle Git panel
+async function toggleGitPanel() {
+  if (!gitPanelShadowRoot) {
+    injectGitPanel();
+  }
+  
+  const shadowRoot = getGitPanelShadowRoot();
+  const panel = shadowRoot.getElementById('n8n-git-panel');
+  
+  if (!panel) {
+    injectGitPanel();
+    setTimeout(() => toggleGitPanel(), 100);
+    return;
+  }
+  
+  gitPanelVisible = !gitPanelVisible;
+  
+  if (gitPanelVisible) {
+    panel.classList.add('visible');
+    const host = document.getElementById('n8n-github-git-panel-host');
+    if (host) {
+      host.style.pointerEvents = 'auto';
+    }
+    await loadGitHistory();
+  } else {
+    panel.classList.remove('visible');
+    const host = document.getElementById('n8n-github-git-panel-host');
+    if (host) {
+      host.style.pointerEvents = 'none';
+    }
+  }
+}
+
+// Load Git history
+async function loadGitHistory(branch = null) {
+  const shadowRoot = getGitPanelShadowRoot();
+  const timelineContainer = shadowRoot.getElementById('n8n-git-timeline-container');
+  const branchSelect = shadowRoot.getElementById('n8n-git-branch-select');
+  
+  if (!timelineContainer) return;
+  
+  timelineContainer.innerHTML = '<div class="n8n-git-loading">Loading commit history...</div>';
+  
+  try {
+    const instanceUrl = getInstanceUrl();
+    const configResponse = await sendMessageSafe({
+      action: 'getConfig',
+      instanceUrl: instanceUrl
+    });
+    
+    if (!configResponse || !configResponse.success || !configResponse.config) {
+      timelineContainer.innerHTML = '<div class="n8n-git-error">No configuration found. Please configure GitHub settings first.</div>';
+      return;
+    }
+    
+    const config = configResponse.config;
+    
+    if (!config.githubRepo || !config.githubToken) {
+      timelineContainer.innerHTML = '<div class="n8n-git-error">GitHub repository or token not configured.</div>';
+      return;
+    }
+    
+    const targetBranch = branch || config.defaultBranch || 'main';
+    
+    // Load branches
+    const branchesResponse = await sendMessageSafe({
+      action: 'getBranches',
+      owner: config.githubRepo.split('/')[0],
+      repo: config.githubRepo.split('/')[1],
+      githubToken: config.githubToken,
+      vpsUrl: config.vpsUrl
+    });
+    
+    if (branchesResponse && branchesResponse.success && branchesResponse.branches) {
+      branchSelect.innerHTML = '';
+      branchesResponse.branches.forEach(b => {
+        const option = document.createElement('option');
+        option.value = b.name;
+        option.textContent = b.name + (b.current ? ' (current)' : '');
+        option.selected = b.name === targetBranch;
+        branchSelect.appendChild(option);
+      });
+    }
+    
+    // Load commits
+    const commitsResponse = await sendMessageSafe({
+      action: 'getGitHistory',
+      owner: config.githubRepo.split('/')[0],
+      repo: config.githubRepo.split('/')[1],
+      branch: targetBranch,
+      githubToken: config.githubToken,
+      vpsUrl: config.vpsUrl,
+      limit: 50
+    });
+    
+    if (!commitsResponse || !commitsResponse.success) {
+      timelineContainer.innerHTML = `<div class="n8n-git-error">Error loading commits: ${commitsResponse?.error || 'Unknown error'}</div>`;
+      return;
+    }
+    
+    const commits = commitsResponse.commits || [];
+    
+    if (commits.length === 0) {
+      timelineContainer.innerHTML = '<div class="n8n-git-loading">No commits found.</div>';
+      return;
+    }
+    
+    // Render timeline
+    const timeline = document.createElement('div');
+    timeline.className = 'n8n-git-timeline';
+    
+    commits.forEach(commit => {
+      const commitEl = document.createElement('div');
+      commitEl.className = 'n8n-git-commit';
+      
+      const date = new Date(commit.date);
+      const dateStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      
+      commitEl.innerHTML = `
+        <div class="n8n-git-commit-dot"></div>
+        <div class="n8n-git-commit-message">${escapeHtml(commit.message)}</div>
+        <div class="n8n-git-commit-meta">
+          ${escapeHtml(commit.author.name)} • ${dateStr}
+        </div>
+      `;
+      
+      timeline.appendChild(commitEl);
+    });
+    
+    timelineContainer.innerHTML = '';
+    timelineContainer.appendChild(timeline);
+    
+  } catch (error) {
+    log('Error loading Git history:', error);
+    timelineContainer.innerHTML = `<div class="n8n-git-error">Error: ${error.message}</div>`;
+  }
+}
+
+// Helper function to escape HTML
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// Inject Git button
+function injectGitButton() {
+  if (gitPanelInjected) {
+    return;
+  }
+  
+  const header = findHeader();
+  if (!header) {
+    return;
+  }
+  
+  if (document.getElementById('n8n-github-git-btn')) {
+    gitPanelInjected = true;
+    return;
+  }
+  
+  const btn = createGitButton();
+  
+  // Insert after settings button if it exists
+  const settingsBtn = document.getElementById('n8n-github-settings-btn');
+  if (settingsBtn && settingsBtn.parentElement) {
+    settingsBtn.parentElement.insertBefore(btn, settingsBtn.nextSibling);
+  } else if (header) {
+    header.appendChild(btn);
+  } else {
+    btn.style.cssText += 'position: fixed; top: 50px; right: 60px; z-index: 9999;';
+    document.body.appendChild(btn);
+  }
+  
+  gitPanelInjected = true;
+}
 
 log('Content script loaded and ready');
