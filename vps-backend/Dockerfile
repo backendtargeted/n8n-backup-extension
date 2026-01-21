@@ -17,12 +17,12 @@ COPY . .
 # Create repos directory
 RUN mkdir -p /tmp/n8n-git-repos
 
-# Expose port
-EXPOSE 3000
+# Expose port (default 80 for Easypanel, but configurable via PORT env var)
+EXPOSE 80
 
-# Health check
+# Health check (uses PORT env var or defaults to 80)
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD python -c "import requests; requests.get('http://localhost:3000/health')"
+  CMD python -c "import os, requests; port = os.getenv('PORT', '80'); requests.get(f'http://localhost:{port}/health')"
 
 # Start server
 CMD ["python", "app.py"]

@@ -4,10 +4,10 @@ services:
   git-api:
     build: .
     ports:
-      - "3000:3000"
+      - "80:80"
     environment:
       - FLASK_ENV=production
-      - PORT=3000
+      - PORT=80
       - REDIS_URL=redis://redis:6379
       - REPOS_DIR=/tmp/n8n-git-repos
       - ALLOWED_ORIGINS=

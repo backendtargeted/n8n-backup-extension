@@ -24,12 +24,23 @@ else:
 # Redis connection
 redis_client = None
 try:
-    redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
-    redis_client = redis.from_url(redis_url, decode_responses=True)
+    # Try REDIS_URL first, then fallback to service name in Docker, then localhost
+    redis_url = os.getenv('REDIS_URL')
+    if not redis_url:
+        # In Docker Compose, try service name
+        if os.path.exists('/.dockerenv'):
+            redis_url = 'redis://redis:6379'
+            print('Detected Docker environment, using redis://redis:6379')
+        else:
+            redis_url = 'redis://localhost:6379'
+    
+    print(f'Attempting Redis connection to: {redis_url}')
+    redis_client = redis.from_url(redis_url, decode_responses=True, socket_connect_timeout=2)
     redis_client.ping()
     print('Redis connected successfully')
 except Exception as e:
     print(f'Redis connection failed: {e}. Continuing without cache...')
+    print('Note: The app will work without Redis, but caching will be disabled.')
     redis_client = None
 
 # Rate limiting decorator
@@ -439,6 +450,13 @@ def webhook():
     return jsonify({'success': True, 'message': 'Cache invalidated'})
 
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 3000))
+    # Default to port 80 for Easypanel, fallback to 3000 for local dev
+    port = int(os.getenv('PORT', os.getenv('EASYPANEL_PORT', 80)))
+    print(f'Starting Flask server on port {port}')
+    print(f'Environment: {os.getenv("FLASK_ENV", "production")}')
+    redis_env_url = os.getenv('REDIS_URL', 'not set')
+    print(f'Redis URL env var: {redis_env_url}')
+    print(f'Repos directory: {REPOS_DIR}')
+    print(f'Listening on: http://0.0.0.0:{port}')
     app.run(host='0.0.0.0', port=port, debug=os.getenv('FLASK_ENV') == 'development')
 
