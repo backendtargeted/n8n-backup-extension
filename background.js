@@ -1960,6 +1960,10 @@ async function fetchGitHistory(owner, repo, branch, githubToken, vpsUrl) {
       const vpsUrlClean = vpsUrl.trim().replace(/\/+$/, '');
       const url = `${vpsUrlClean}/api/commits?repo=${encodeURIComponent(repoFull)}&branch=${encodeURIComponent(branch || 'main')}&limit=50`;
       
+      console.log('[n8n-ext] Calling VPS backend:', url);
+      console.log('[n8n-ext] VPS URL:', vpsUrlClean);
+      console.log('[n8n-ext] Repo:', repoFull, 'Branch:', branch);
+      
       const response = await fetch(url, {
         headers: {
           'x-github-token': githubToken,
@@ -1967,15 +1971,24 @@ async function fetchGitHistory(owner, repo, branch, githubToken, vpsUrl) {
         }
       });
       
+      console.log('[n8n-ext] VPS response status:', response.status, response.statusText);
+      
       if (response.ok) {
         const commits = await response.json();
+        console.log('[n8n-ext] VPS returned', commits.length, 'commits');
         return commits;
       } else {
-        console.log('VPS backend failed, falling back to GitHub API');
+        const errorText = await response.text();
+        console.log('[n8n-ext] VPS backend failed:', response.status, errorText);
+        console.log('[n8n-ext] Falling back to GitHub API');
       }
     } catch (error) {
-      console.log('VPS backend error, falling back to GitHub API:', error.message);
+      console.error('[n8n-ext] VPS backend error:', error);
+      console.log('[n8n-ext] Error details:', error.message, error.stack);
+      console.log('[n8n-ext] Falling back to GitHub API');
     }
+  } else {
+    console.log('[n8n-ext] No VPS URL configured, using GitHub API directly');
   }
   
   // Fallback to direct GitHub API
@@ -2066,6 +2079,10 @@ async function fetchBranches(owner, repo, githubToken, vpsUrl) {
       const vpsUrlClean = vpsUrl.trim().replace(/\/+$/, '');
       const url = `${vpsUrlClean}/api/branches?repo=${encodeURIComponent(repoFull)}`;
       
+      console.log('[n8n-ext] Calling VPS backend for branches:', url);
+      console.log('[n8n-ext] VPS URL:', vpsUrlClean);
+      console.log('[n8n-ext] Repo:', repoFull);
+      
       const response = await fetch(url, {
         headers: {
           'x-github-token': githubToken,
@@ -2073,13 +2090,22 @@ async function fetchBranches(owner, repo, githubToken, vpsUrl) {
         }
       });
       
+      console.log('[n8n-ext] VPS branches response status:', response.status, response.statusText);
+      
       if (response.ok) {
         const branches = await response.json();
+        console.log('[n8n-ext] VPS returned', branches.length, 'branches');
         return branches;
+      } else {
+        const errorText = await response.text();
+        console.log('[n8n-ext] VPS backend failed:', response.status, errorText);
       }
     } catch (error) {
-      console.log('VPS backend error, falling back to GitHub API:', error.message);
+      console.error('[n8n-ext] VPS backend error:', error);
+      console.log('[n8n-ext] Error details:', error.message, error.stack);
     }
+  } else {
+    console.log('[n8n-ext] No VPS URL configured, using GitHub API directly');
   }
   
   // Fallback to direct GitHub API

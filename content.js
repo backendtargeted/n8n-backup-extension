@@ -1437,6 +1437,38 @@ function injectSettingsPanel() {
   shadowRoot.appendChild(panel);
   log('Settings panel injected into shadow DOM');
   
+  // Prevent paste/copy/cut events from bubbling to n8n canvas
+  const settingsContent = shadowRoot.getElementById('n8n-github-settings-panel');
+  if (settingsContent) {
+    // Stop paste events on the entire panel
+    settingsContent.addEventListener('paste', (e) => {
+      // Only stop propagation if target is within our panel
+      const target = e.target;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')) {
+        e.stopPropagation();
+        // Let browser handle paste normally for input fields
+      } else {
+        // For other elements, stop both propagation and default
+        e.stopPropagation();
+        e.preventDefault();
+      }
+    }, true); // Use capture phase to catch events early
+    
+    settingsContent.addEventListener('copy', (e) => {
+      const target = e.target;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
+        e.stopPropagation();
+      }
+    }, true);
+    
+    settingsContent.addEventListener('cut', (e) => {
+      const target = e.target;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
+        e.stopPropagation();
+      }
+    }, true);
+  }
+  
   // Event listeners
   const closeBtn = shadowRoot.getElementById('n8n-github-settings-close');
   if (closeBtn) {
@@ -1918,7 +1950,8 @@ async function showInstanceEditView(instanceId) {
     githubToken: '',
     githubPathPattern: 'workflows/{workflow-name}.json',
     commitMessage: 'Update workflow: {workflow-name}',
-    defaultBranch: 'main'
+    defaultBranch: 'main',
+    vpsUrl: ''
   };
   
   if (instanceId) {
@@ -2002,7 +2035,7 @@ async function showInstanceEditView(instanceId) {
     
     <div class="n8n-github-settings-field">
       <label for="vps-url">VPS Backend URL (Optional)</label>
-      <input type="text" id="vps-url" placeholder="https://your-vps.com/git-api" value="${escapeHtml(config.vpsUrl || '')}" autocomplete="off" data-lpignore="true" />
+      <input type="text" id="vps-url" placeholder="https://your-vps.com/git-api" value="${escapeHtml(config.vpsUrl || '')}" autocomplete="url" data-lpignore="true" />
       <small>Optional: VPS backend URL for faster Git operations. Leave empty to use GitHub API directly.</small>
     </div>
         
@@ -2097,9 +2130,38 @@ async function showInstanceEditView(instanceId) {
     tokenInput.addEventListener('blur', reloadBranches);
   }
   
-  // Ensure all input fields are editable
+  // Prevent paste events from bubbling to n8n canvas
+  const detailsContentForPaste = shadowRoot.getElementById('n8n-details-content');
+  if (detailsContentForPaste) {
+    // Stop paste events on the container
+    detailsContentForPaste.addEventListener('paste', (e) => {
+      e.stopPropagation();
+      // Only handle if target is an input/textarea
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+        // Let the browser handle paste normally for input fields
+        return;
+      }
+      // Prevent default for other elements
+      e.preventDefault();
+    }, true); // Use capture phase
+    
+    // Stop copy/cut events too
+    detailsContentForPaste.addEventListener('copy', (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+        e.stopPropagation();
+      }
+    }, true);
+    
+    detailsContentForPaste.addEventListener('cut', (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+        e.stopPropagation();
+      }
+    }, true);
+  }
+  
+  // Ensure all input fields are editable and handle paste events
   setTimeout(() => {
-    const inputs = shadowRoot.querySelectorAll('#n8n-details-content input, #n8n-details-content select');
+    const inputs = shadowRoot.querySelectorAll('#n8n-details-content input, #n8n-details-content select, #n8n-details-content textarea');
     
     inputs.forEach(input => {
       // Remove readonly/disabled attributes
@@ -2108,6 +2170,20 @@ async function showInstanceEditView(instanceId) {
       // Force editable state
       input.readOnly = false;
       input.disabled = false;
+      
+      // Stop paste events from bubbling to n8n canvas
+      input.addEventListener('paste', (e) => {
+        e.stopPropagation();
+        // Let browser handle paste normally
+      }, true);
+      
+      input.addEventListener('copy', (e) => {
+        e.stopPropagation();
+      }, true);
+      
+      input.addEventListener('cut', (e) => {
+        e.stopPropagation();
+      }, true);
       
       // Ensure autocomplete is set
       if (input.type === 'password') {
@@ -2614,6 +2690,34 @@ function toggleSettingsPanel() {
   const host = document.getElementById('n8n-github-settings-panel-host');
   if (host) {
     host.style.pointerEvents = settingsVisible ? 'auto' : 'none';
+  }
+  
+  // When panel is visible, prevent paste events from reaching n8n canvas
+  if (settingsVisible) {
+    // Add global paste handler to document when panel is open
+    const pasteHandler = (e) => {
+      // Check if the event target is within our settings panel shadow DOM
+      const target = e.target;
+      const panelElement = shadowRoot.getElementById('n8n-github-settings-panel');
+      if (panelElement && (panelElement.contains(target) || target.closest('#n8n-github-settings-panel-host'))) {
+        // Event is within our panel, stop it from reaching n8n
+        e.stopPropagation();
+      }
+    };
+    
+    // Store handler for cleanup
+    panel._pasteHandler = pasteHandler;
+    document.addEventListener('paste', pasteHandler, true);
+    document.addEventListener('copy', pasteHandler, true);
+    document.addEventListener('cut', pasteHandler, true);
+  } else {
+    // Remove handlers when panel is closed
+    if (panel._pasteHandler) {
+      document.removeEventListener('paste', panel._pasteHandler, true);
+      document.removeEventListener('copy', panel._pasteHandler, true);
+      document.removeEventListener('cut', panel._pasteHandler, true);
+      delete panel._pasteHandler;
+    }
   }
   
   log('Settings panel toggled:', settingsVisible);
@@ -4156,6 +4260,14 @@ async function loadGitHistory(branch = null) {
     }
     
     const targetBranch = branch || config.defaultBranch || 'main';
+    
+    log('Loading Git history - VPS URL:', config.vpsUrl || 'not configured');
+    log('Config:', { 
+      hasVpsUrl: !!config.vpsUrl, 
+      vpsUrl: config.vpsUrl,
+      githubRepo: config.githubRepo,
+      branch: targetBranch 
+    });
     
     // Load branches
     const branchesResponse = await sendMessageSafe({

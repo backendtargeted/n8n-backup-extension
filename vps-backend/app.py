@@ -10,7 +10,16 @@ from datetime import datetime
 import re
 
 app = Flask(__name__)
-CORS(app, origins=os.getenv('ALLOWED_ORIGINS', '').split(',') if os.getenv('ALLOWED_ORIGINS') else None)
+# CORS: Allow all origins for Chrome extensions (they don't send Origin header)
+# In production, you might want to restrict this
+allowed_origins = os.getenv('ALLOWED_ORIGINS', '').split(',') if os.getenv('ALLOWED_ORIGINS') else None
+print(f'CORS allowed origins: {allowed_origins}')
+if allowed_origins and allowed_origins != ['']:
+    CORS(app, origins=allowed_origins)
+else:
+    # Allow all origins (for Chrome extensions)
+    CORS(app, resources={r"/api/*": {"origins": "*"}})
+    print('CORS: Allowing all origins for /api/* endpoints')
 
 # Redis connection
 redis_client = None
@@ -185,35 +194,48 @@ def github_api_get(url, token):
 
 @app.route('/health', methods=['GET'])
 def health():
+    print(f'[API] GET /health - IP: {request.remote_addr}')
     return jsonify({'status': 'ok', 'timestamp': str(datetime.now())})
 
 @app.route('/api/commits', methods=['GET'])
 @rate_limit()
 def get_commits():
+    print(f'[API] GET /api/commits - IP: {request.remote_addr}')
     repo = request.args.get('repo')
     branch = request.args.get('branch', 'main')
     limit = int(request.args.get('limit', 50))
     github_token = request.headers.get('x-github-token')
     
+    print(f'[API] Request params: repo={repo}, branch={branch}, limit={limit}, has_token={bool(github_token)}')
+    
     if not repo or not github_token:
+        print(f'[API] Missing required parameters: repo={bool(repo)}, token={bool(github_token)}')
         return jsonify({'error': 'Missing required parameters'}), 400
     
     if not re.match(r'^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$', repo):
+        print(f'[API] Invalid repository format: {repo}')
         return jsonify({'error': 'Invalid repository format'}), 400
     
     cache_key = get_cache_key('commits', repo=repo, branch=branch, limit=limit)
     cached = get_from_cache(cache_key)
     if cached:
+        print(f'[API] Returning cached commits for {repo}:{branch}')
         return jsonify(cached)
     
     try:
+        print(f'[API] Cloning/updating repo: {repo}')
         repo_path = ensure_repo_cloned(repo)
+        print(f'[API] Getting git log for {repo}:{branch}')
         commits = git_log(repo_path, branch, limit)
+        print(f'[API] Got {len(commits)} commits from local git')
     except Exception as e:
-        print(f'Git clone failed, using GitHub API: {e}')
+        print(f'[API] Git clone failed, using GitHub API: {e}')
+        import traceback
+        print(f'[API] Traceback: {traceback.format_exc()}')
         # Fallback to GitHub API
         owner, repo_name = repo.split('/')
         url = f'https://api.github.com/repos/{owner}/{repo_name}/commits?sha={branch}&per_page={limit}'
+        print(f'[API] Fetching from GitHub API: {url}')
         github_commits = github_api_get(url, github_token)
         commits = [{
             'sha': c['sha'],
@@ -225,35 +247,49 @@ def get_commits():
             'date': c['commit']['author']['date'],
             'branch': branch
         } for c in github_commits]
+        print(f'[API] Got {len(commits)} commits from GitHub API')
     
     set_cache(cache_key, commits, 300)
+    print(f'[API] Returning {len(commits)} commits')
     return jsonify(commits)
 
 @app.route('/api/branches', methods=['GET'])
 @rate_limit()
 def get_branches():
+    print(f'[API] GET /api/branches - IP: {request.remote_addr}')
     repo = request.args.get('repo')
     github_token = request.headers.get('x-github-token')
     
+    print(f'[API] Request params: repo={repo}, has_token={bool(github_token)}')
+    
     if not repo or not github_token:
+        print(f'[API] Missing required parameters: repo={bool(repo)}, token={bool(github_token)}')
         return jsonify({'error': 'Missing required parameters'}), 400
     
     if not re.match(r'^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$', repo):
+        print(f'[API] Invalid repository format: {repo}')
         return jsonify({'error': 'Invalid repository format'}), 400
     
     cache_key = get_cache_key('branches', repo=repo)
     cached = get_from_cache(cache_key)
     if cached:
+        print(f'[API] Returning cached branches for {repo}')
         return jsonify(cached)
     
     try:
+        print(f'[API] Cloning/updating repo: {repo}')
         repo_path = ensure_repo_cloned(repo)
+        print(f'[API] Getting branches for {repo}')
         branches = git_branches(repo_path)
+        print(f'[API] Got {len(branches)} branches from local git')
     except Exception as e:
-        print(f'Git clone failed, using GitHub API: {e}')
+        print(f'[API] Git clone failed, using GitHub API: {e}')
+        import traceback
+        print(f'[API] Traceback: {traceback.format_exc()}')
         # Fallback to GitHub API
         owner, repo_name = repo.split('/')
         url = f'https://api.github.com/repos/{owner}/{repo_name}/branches'
+        print(f'[API] Fetching branches from GitHub API: {url}')
         github_branches = github_api_get(url, github_token)
         repo_info = github_api_get(f'https://api.github.com/repos/{owner}/{repo_name}', github_token)
         default_branch = repo_info.get('default_branch', 'main')
@@ -268,8 +304,10 @@ def get_branches():
                 'date': b['commit']['commit']['author']['date'] if b['commit'].get('commit') else ''
             }
         } for b in github_branches]
+        print(f'[API] Got {len(branches)} branches from GitHub API')
     
     set_cache(cache_key, branches, 300)
+    print(f'[API] Returning {len(branches)} branches')
     return jsonify(branches)
 
 @app.route('/api/commit-graph', methods=['GET'])
